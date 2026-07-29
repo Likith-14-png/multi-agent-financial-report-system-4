@@ -78,7 +78,7 @@ Extraction Agent    Red Flag Agent   Research Agent
                    Report Agent
                           │
                           ▼
-     Analyst-Style Financial Report (PDF)
+         Analyst-Style Financial Report (PDF)
 ---
 
 # Agents
