@@ -51,31 +51,34 @@ The system automates financial document analysis using multiple specialized AI a
 
 # System Architecture
 
-User Uploads Financial Documents
-│
-▼
-Document Agent
-│
-▼
-ChromaDB Vector Database
-│
-├──────────────┐
-│ │
-▼ ▼
-Extraction Agent Red Flag Agent
-│ │
-└──────┬───────┘
-│
-▼
-Comparison Agent
-│
-▼
-Research Agent
-│
-▼
-Report Agent
-│
-
+                        User
+                          │
+                          ▼
+              Upload Financial Documents
+                          │
+                          ▼
+                  Document Agent
+                          │
+        (Extract → Clean → Chunk → Embed)
+                          │
+                          ▼
+               ChromaDB Vector Database
+                          │
+        ┌─────────────────┼─────────────────┐
+        │                 │                 │
+        ▼                 ▼                 ▼
+Extraction Agent    Red Flag Agent   Research Agent
+        │                 │                 │
+        └─────────────────┼─────────────────┘
+                          │
+                          ▼
+                 Comparison Agent
+                          │
+                          ▼
+                   Report Agent
+                          │
+                          ▼
+     Analyst-Style Financial Report (PDF)
 ---
 
 # Agents
