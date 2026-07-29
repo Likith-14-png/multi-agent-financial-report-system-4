@@ -209,3 +209,5 @@ Generating analyst-style reports including:
 
 The system enables users to analyze lengthy financial reports quickly by providing accurate financial insights, risk detection, company comparisons, and AI-generated research reports with source-grounded answers.
 
+<img width="961" height="635" alt="image" src="https://github.com/user-attachments/assets/d8743efc-4c3a-4be6-8f84-4636cee74f33" />
+
