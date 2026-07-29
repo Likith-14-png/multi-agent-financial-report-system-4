@@ -51,7 +51,7 @@ The system automates financial document analysis using multiple specialized AI a
 
 # System Architecture
 
-          <img width="420" height="635" alt="image" src="https://github.com/user-attachments/assets/6d352b71-1c40-494e-88c4-eed2c04b1739" />
+ <img width="420" height="635" alt="image" src="https://github.com/user-attachments/assets/6d352b71-1c40-494e-88c4-eed2c04b1739" />
 
 ---
 
