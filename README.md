@@ -12,9 +12,9 @@ infosys springboard virtual internship 7.0 team 4
 | Name | Role |
 |------|------|
 | Likith | Document Agent |
-| member 2 | Extraction Agent |
+| kusuma | Extraction Agent |
 | rajan | Red Flag Agent |
-| Member 4 | Comparison Agent |
+| navyatha | Comparison Agent |
 | gaurav | Research Agent |
 | keerthana | Report Agent |
 
