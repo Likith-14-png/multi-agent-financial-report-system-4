@@ -1,0 +1,81 @@
+                    USER
+                      │
+                      │
+      Upload Annual Report (PDF)
+            OR Ask a Question
+                      │
+                      ▼
+        Research Workspace & Session
+            (Manage Research Sessions)
+                      │
+                      ▼
+              Document Agent
+────────────────────────────────────────
+1. Upload PDF
+2. Parse PDF
+3. Split into Chunks
+4. Generate Embeddings
+5. Store in Vector Database
+────────────────────────────────────────
+                      │
+                      ▼
+            Extraction Agent
+────────────────────────────────────────
+Extract:
+• Revenue
+• Net Profit
+• Assets
+• Liabilities
+• Debt
+• Cash Flow
+• Financial Ratios
+• Performance Indicators
+────────────────────────────────────────
+                      │
+                      ▼
+             Red Flag Agent
+────────────────────────────────────────
+Detect:
+• Rising Debt
+• Falling Margins
+• Auditor Qualifications
+• Financial Anomalies
+• Risk Indicators
+────────────────────────────────────────
+                      │
+                      ▼
+        Multi-Agent Orchestration Layer
+────────────────────────────────────────
+Coordinates all agents
+Shares outputs between them
+Controls execution order
+────────────────────────────────────────
+             ┌──────────────┴──────────────┐
+             │                             │
+             ▼                             ▼
+      Comparison Agent             Research Agent
+────────────────────────      ────────────────────────
+Compare Companies         User asks:
+                          "Why did profit fall?"
+                          "Compare TCS vs Infosys"
+                          "What are major risks?"
+                          Uses Retrieval +
+                          Reasoning +
+                          Source Citation
+────────────────────────      ────────────────────────
+             │                             │
+             └──────────────┬──────────────┘
+                            ▼
+                    Report Agent
+────────────────────────────────────────
+Generate PDF Report
+
+• Executive Summary
+• Key Financial Metrics
+• Red Flags
+• Company Comparison
+• Outlook
+────────────────────────────────────────
+                            │
+                            ▼
+                    Final PDF Report

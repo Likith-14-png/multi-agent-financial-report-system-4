@@ -1,0 +1,39 @@
+PDF
+ │
+ ▼
+Document Agent
+ │
+ ▼
+Chunks
+ │
+ ▼
+Embeddings
+ │
+ ▼
+Vector Database
+ │
+ ├────────► Extraction Agent
+ │              │
+ │              ▼
+ │        Financial Metrics
+ │
+ ├────────► Red Flag Agent
+ │              │
+ │              ▼
+ │        Risk Analysis
+ │
+ ├────────► Research Agent
+ │              │
+ │              ▼
+ │        Question Answering
+ │
+ └────────► Comparison Agent
+                │
+                ▼
+        Compare Companies
+                │
+                ▼
+          Report Agent
+                │
+                ▼
+          Final PDF Report
