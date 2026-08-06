@@ -1054,10 +1054,72 @@ class DocumentAgent:
             logger.exception("Error ingesting %s", path)
             return IngestionResult("error", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, False, str(exc)).to_dict()
 
-    def ingest_directory(self, directory_path: str) -> List[Dict[str, Any]]:
+    def ingest_directory(self, directory_path: str, analysis_id: Optional[str] = None) -> List[Dict[str, Any]]:
         files = discover_supported_files(directory_path)
+        current_analysis = analysis_id or self.create_analysis()
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            return [future.result() for future in [executor.submit(self.ingest_document, str(path)) for path in files]]
+            return [future.result() for future in [executor.submit(self.ingest_document, str(path), analysis_id=current_analysis) for path in files]]
+
+    def query_analysis(self, analysis_id: str, question: str, n_results: int = 5) -> Dict[str, Any]:
+        """Execute semantic search within a specific analysis session.
+        
+        Args:
+            analysis_id: UUID of the research session/analysis
+            question: Query text to search for
+            n_results: Maximum number of results to return
+            
+        Returns:
+            ChromaDB query result containing only chunks from the specified analysis
+        """
+        try:
+            results = self.collection.query(
+                query_texts=[question],
+                n_results=n_results,
+                where={"analysis_id": analysis_id},
+                include=["documents", "metadatas", "distances", "embeddings"]
+            )
+            return results
+        except Exception as exc:
+            logger.error("Error querying analysis %s: %s", analysis_id, exc)
+            return {"ids": [], "documents": [], "metadatas": [], "distances": [], "embeddings": []}
+
+    def get_documents_by_analysis(self, analysis_id: str) -> Dict[str, Any]:
+        """Retrieve all documents and chunks for a specific analysis session.
+        
+        Args:
+            analysis_id: UUID of the research session/analysis
+            
+        Returns:
+            Dictionary containing analysis_id, unique document names, total counts
+        """
+        try:
+            results = self.collection.get(
+                where={"analysis_id": analysis_id},
+                include=["metadatas"]
+            )
+            
+            # Extract unique document names from source metadata
+            sources = set()
+            if results.get("metadatas"):
+                for metadata in results["metadatas"]:
+                    if isinstance(metadata, dict) and "source" in metadata:
+                        sources.add(metadata["source"])
+            
+            return {
+                "analysis_id": analysis_id,
+                "documents": sorted(list(sources)),
+                "total_documents": len(sources),
+                "total_chunks": len(results.get("ids", []))
+            }
+        except Exception as exc:
+            logger.error("Error retrieving documents for analysis %s: %s", analysis_id, exc)
+            return {
+                "analysis_id": analysis_id,
+                "documents": [],
+                "total_documents": 0,
+                "total_chunks": 0,
+                "error": str(exc)
+            }
 
     def get_collection_stats(self) -> Dict[str, Any]:
         return {"collection_name": self.config.collection_name, "total_chunks": self.collection.count(), "database_path": self.config.db_path, "embedding_model": self.config.embedding_model_name}
@@ -1067,4 +1129,43 @@ if __name__ == "__main__":
     scripts_dir = Path(__file__).resolve().parent
     root = scripts_dir.parent
     db = resolve_chroma_db_path(__file__, root.parent)
-    print(DocumentAgent(DocumentAgentConfig(db_path=str(db))).ingest_directory(str(scripts_dir / "demo_data")))
+    agent = DocumentAgent(DocumentAgentConfig(db_path=str(db)))
+    
+    # REQUIREMENT 1: Create a new analysis session
+    analysis_id = agent.create_analysis()
+    print(f"\n[MILESTONE 1 DEMONSTRATION]\n")
+    print(f"1. Created new analysis session")
+    print(f"   Analysis ID: {analysis_id}\n")
+    
+    # REQUIREMENT 1: Ingest directory with the SAME analysis_id
+    print(f"2. Ingesting documents from demo_data with shared analysis_id...")
+    ingest_results = agent.ingest_directory(str(scripts_dir / "demo_data"), analysis_id=analysis_id)
+    success_count = sum(1 for r in ingest_results if r.get("status") == "success")
+    print(f"   Successfully ingested {success_count} documents\n")
+    
+    # REQUIREMENT 2: Get documents for this analysis
+    print(f"3. Retrieving all documents in this analysis session")
+    analysis_info = agent.get_documents_by_analysis(analysis_id)
+    print(f"   Documents in analysis:")
+    for doc in analysis_info["documents"]:
+        print(f"      - {doc}")
+    print(f"   Total documents: {analysis_info['total_documents']}")
+    print(f"   Total chunks: {analysis_info['total_chunks']}\n")
+    
+    # REQUIREMENT 3: Query within this analysis
+    print(f"4. Performing semantic search within this analysis")
+    print(f"   Query: 'What was the revenue?'\n")
+    query_results = agent.query_analysis(analysis_id, "What was the revenue?", n_results=3)
+    if query_results["ids"] and query_results["ids"][0]:
+        print(f"   Retrieved {len(query_results['ids'][0])} results:")
+        for i, (doc, metadata, distance) in enumerate(zip(
+            query_results["documents"][0],
+            query_results["metadatas"][0],
+            query_results["distances"][0]
+        ), 1):
+            print(f"\n   Result {i}:")
+            print(f"      Source: {metadata.get('source', 'Unknown')}")
+            print(f"      Distance: {distance:.4f}")
+            print(f"      Chunk preview: {doc[:150]}...")
+    else:
+        print(f"   No results found in this analysis")

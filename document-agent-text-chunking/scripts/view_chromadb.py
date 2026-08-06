@@ -27,6 +27,15 @@ def summarize(collection) -> None:
     embeddings = _as_list(data.get("embeddings", []))
 
     records = [{"id": chunk_id, "document": documents[index] if index < len(documents) else "", "metadata": metadatas[index] if index < len(metadatas) else {}, "embedding": embeddings[index] if index < len(embeddings) else None} for index, chunk_id in enumerate(ids)]
+    
+    # Group records by analysis_id
+    analyses = {}
+    for record in records:
+        analysis_id = record["metadata"].get("analysis_id", "unknown")
+        if analysis_id not in analyses:
+            analyses[analysis_id] = []
+        analyses[analysis_id].append(record)
+    
     metadata_count = sum(sum(field in record["metadata"] and record["metadata"][field] not in ("", None) for field in REQUIRED) for record in records)
     possible = len(records) * len(REQUIRED)
     missing = Counter(field for record in records for field in REQUIRED if field not in record["metadata"] or record["metadata"][field] in ("", None))
@@ -38,9 +47,13 @@ def summarize(collection) -> None:
     metrics = Counter(metric for record in records for metric in str(record["metadata"].get("financial_metrics", "")).split(",") if metric)
     sizes = [len(record["document"].split()) for record in records]
     dimensions = sorted({len(record["embedding"]) for record in records if record["embedding"] is not None})
+    
+    print(f"\n{'='*80}")
     print(f"Collection: {collection.name}")
-    print(f"Chunks: {len(records)}")
-    print(f"Documents: {len({r['metadata'].get('doc_hash') for r in records if r['metadata'].get('doc_hash')})}")
+    print(f"{'='*80}")
+    print(f"Total Chunks: {len(records)}")
+    print(f"Total Documents: {len({r['metadata'].get('doc_hash') for r in records if r['metadata'].get('doc_hash')})}")
+    print(f"Total Analysis Sessions: {len(analyses)}")
     print(f"Companies: {', '.join(sorted({r['metadata'].get('company_name') for r in records if r['metadata'].get('company_name')})) or '<unknown>'}")
     print(f"Reports: {', '.join(sorted({r['metadata'].get('report_type') for r in records if r['metadata'].get('report_type')})) or '<unknown>'}")
     print(f"Years: {', '.join(sorted({str(r['metadata'].get('financial_year')) for r in records if r['metadata'].get('financial_year')})) or '<unknown>'}")
@@ -55,6 +68,24 @@ def summarize(collection) -> None:
     print(f"Charts: {sum(r['metadata'].get('contains_chart') == 'true' for r in records)}")
     print(f"Average chunk size: {sum(sizes) / len(sizes):.1f} words" if sizes else "Average chunk size: 0 words")
     print(f"Embedding dimensions: {dimensions or 'N/A'}")
+    
+    # Analysis-level breakdown
+    print(f"\n{'='*80}")
+    print(f"BREAKDOWN BY ANALYSIS SESSION")
+    print(f"{'='*80}")
+    for idx, (analysis_id, analysis_records) in enumerate(sorted(analyses.items()), 1):
+        analysis_chunks = len(analysis_records)
+        analysis_docs = len({r['metadata'].get('doc_hash') for r in analysis_records if r['metadata'].get('doc_hash')})
+        analysis_sources = sorted({r['metadata'].get('source') for r in analysis_records if r['metadata'].get('source')})
+        analysis_companies = sorted({r['metadata'].get('company_name') for r in analysis_records if r['metadata'].get('company_name')})
+        
+        print(f"\n[Analysis {idx}] UUID: {analysis_id}")
+        print(f"  Chunks: {analysis_chunks}")
+        print(f"  Documents: {analysis_docs}")
+        print(f"  Sources: {', '.join(analysis_sources) or '<unknown>'}")
+        print(f"  Companies: {', '.join(analysis_companies) or '<unknown>'}")
+        print(f"  Tables: {sum(r['metadata'].get('contains_table') == 'true' for r in analysis_records)}")
+        print(f"  Financial Tables: {sum(r['metadata'].get('contains_financial_table') == 'true' for r in analysis_records)}")
 
 
 if __name__ == "__main__":
