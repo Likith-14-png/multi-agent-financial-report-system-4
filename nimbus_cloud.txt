@@ -1,0 +1,48 @@
+Nimbus Cloud Technologies Inc — Annual Report (Fictional Illustrative Filing, for demo purposes only)
+
+Management Discussion and Analysis (MD&A)
+Nimbus Cloud Technologies Inc provides workflow-automation software to
+mid-market enterprises. FY2024 revenue grew rapidly on strong new-customer
+bookings, though the company remains unprofitable as it invests heavily in
+sales and R&D. Management's outlook for FY2025 targets continued growth and
+a path toward operating breakeven, dependent on securing additional financing
+or achieving further reductions in cash burn.
+
+Income Statement Highlights
+Total Revenue: $145.6 million (FY2024), compared to Total Revenue: $96.3 million (FY2023)
+Gross Profit: $102.0 million (FY2024)
+Gross Margin: 70.1 % (FY2024)
+Gross Margin: 68.5 % (FY2023)
+Operating Income: $-38.2 million (FY2024)
+Operating Margin: -26.2 % (FY2024)
+Operating Margin: -19.5 % (FY2023)
+Net Income: $-41.0 million (FY2024)
+Net Margin: -28.2 % (FY2024)
+Earnings Per Share (EPS): $-0.62 (FY2024)
+R&D Expense: $44.0 million (FY2024)
+
+Balance Sheet Highlights
+Total Assets: $210.0 million (FY2024)
+Total Liabilities: $150.0 million (FY2024)
+Total Equity: $60.0 million (FY2024)
+Total Debt: $95.0 million (FY2024), compared to Total Debt: $40.0 million (FY2023)
+Cash and Cash Equivalents: $28.4 million (FY2024)
+Debt-to-Equity Ratio: 158.3 % (FY2024)
+
+Cash Flow Statement Highlights
+Operating Cash Flow: $-30.5 million (FY2024)
+The company drew down an additional term loan during FY2024 to fund continued
+operating losses and extend its cash runway.
+
+Auditor's Report
+The auditors' report includes an explanatory paragraph expressing substantial
+doubt about the company's ability to continue as a going concern, citing
+recurring losses and negative operating cash flow. The auditors issued a
+qualified opinion with respect to this uncertainty. No material weakness in
+internal controls was identified during the audit.
+
+Risk Factors
+The company disclosed a resignation of the CFO in the fourth quarter of
+FY2024. Nimbus Cloud Technologies Inc also disclosed related party transaction
+arrangements with an entity affiliated with a board member. Additional
+financing may not be available on acceptable terms, or at all.
