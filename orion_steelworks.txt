@@ -1,0 +1,43 @@
+Orion Steelworks Ltd — Annual Report (Fictional Illustrative Filing, for demo purposes only)
+
+Management Discussion and Analysis (MD&A)
+Orion Steelworks Ltd is a mid-cap industrial steel producer. Fiscal year 2024 was
+marked by softer construction demand and elevated input costs. Management expects
+volumes to stabilize in FY2025 as infrastructure spending resumes, though pricing
+pressure from imports remains a risk. The outlook for FY2025 is cautiously positive,
+contingent on raw material cost trends and demand recovery in the construction sector.
+
+Income Statement Highlights
+Total Revenue: $482.0 million (FY2024), compared to Total Revenue: $451.0 million (FY2023)
+Gross Profit: $96.4 million (FY2024)
+Gross Margin: 20.0 % (FY2024)
+Gross Margin: 24.5 % (FY2023)
+Operating Income: $38.6 million (FY2024)
+Operating Margin: 8.0 % (FY2024)
+Operating Margin: 11.2 % (FY2023)
+Net Income: $21.3 million (FY2024)
+Net Margin: 4.4 % (FY2024)
+Earnings Per Share (EPS): $1.12 (FY2024)
+
+Balance Sheet Highlights
+Total Assets: $610.0 million (FY2024)
+Total Liabilities: $398.0 million (FY2024)
+Total Equity: $212.0 million (FY2024)
+Total Debt: $265.0 million (FY2024), compared to Total Debt: $190.0 million (FY2023)
+Cash and Cash Equivalents: $34.5 million (FY2024)
+Debt-to-Equity Ratio: 125.0 % (FY2024)
+
+Cash Flow Statement Highlights
+Operating Cash Flow: $52.1 million (FY2024)
+The increase in Total Debt was primarily used to fund a new rolling mill and to
+cover working capital needs during a period of rising raw material costs.
+
+Auditor's Report
+The auditors issued an unqualified opinion on the FY2024 financial statements.
+No material weakness in internal controls was identified during the audit.
+
+Risk Factors
+The company notes customer concentration, with its top three customers accounting
+for a significant customer concentration of revenue. A prolonged downturn in
+construction activity could materially affect results. Litigation related to a
+supplier contract dispute is ongoing and is not expected to be material.
