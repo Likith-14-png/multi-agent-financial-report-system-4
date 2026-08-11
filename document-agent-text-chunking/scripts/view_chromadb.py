@@ -8,7 +8,7 @@ import chromadb
 from shared_chroma_path import resolve_chroma_db_path
 
 
-REQUIRED = ("analysis_id", "source", "doc_hash", "chunk_index", "total_chunks", "page_start", "page_end", "page_numbers", "company_name", "report_type", "financial_year", "section_title", "section_type", "semantic_tags", "financial_metrics", "contains_table", "contains_financial_table", "contains_chart", "previous_chunk_id", "next_chunk_id")
+REQUIRED = ("analysis_id", "document_id", "source", "doc_hash", "doc_type", "chunk_index", "total_chunks", "page_number", "page_start", "page_end", "page_numbers", "company_name", "report_type", "report_year", "report_period", "section_title", "subsection_title", "semantic_tags", "financial_metrics", "is_table", "is_financial_table", "is_chart", "previous_chunk_id", "next_chunk_id")
 
 
 def summarize(collection) -> None:
@@ -39,8 +39,8 @@ def summarize(collection) -> None:
     metadata_count = sum(sum(field in record["metadata"] and record["metadata"][field] not in ("", None) for field in REQUIRED) for record in records)
     possible = len(records) * len(REQUIRED)
     missing = Counter(field for record in records for field in REQUIRED if field not in record["metadata"] or record["metadata"][field] in ("", None))
-    hashes = Counter(record["metadata"].get("doc_hash", "") for record in records)
-    duplicate_hashes = [value for value, count in hashes.items() if value and count > 1]
+    document_hashes = Counter((record["metadata"].get("analysis_id", ""), record["metadata"].get("document_id", ""), record["metadata"].get("doc_hash", "")) for record in records)
+    duplicate_chunk_ids = [value for value, count in Counter(record["id"] for record in records).items() if value and count > 1]
     ids_set = set(ids)
     broken_links = sum(1 for record in records for field in ("previous_chunk_id", "next_chunk_id") if record["metadata"].get(field) and record["metadata"][field] not in ids_set)
     tags = Counter(tag for record in records for tag in str(record["metadata"].get("semantic_tags", "")).split(",") if tag)
@@ -56,16 +56,17 @@ def summarize(collection) -> None:
     print(f"Total Analysis Sessions: {len(analyses)}")
     print(f"Companies: {', '.join(sorted({r['metadata'].get('company_name') for r in records if r['metadata'].get('company_name')})) or '<unknown>'}")
     print(f"Reports: {', '.join(sorted({r['metadata'].get('report_type') for r in records if r['metadata'].get('report_type')})) or '<unknown>'}")
-    print(f"Years: {', '.join(sorted({str(r['metadata'].get('financial_year')) for r in records if r['metadata'].get('financial_year')})) or '<unknown>'}")
+    print(f"Years: {', '.join(sorted({str(r['metadata'].get('report_year') or r['metadata'].get('financial_year')) for r in records if r['metadata'].get('report_year') or r['metadata'].get('financial_year')})) or '<unknown>'}")
     print(f"Metadata completeness: {metadata_count / possible:.1%}" if possible else "Metadata completeness: 0.0%")
     print(f"Missing metadata: {dict(missing)}")
-    print(f"Duplicate document hashes: {duplicate_hashes or 'none'}")
+    print(f"Duplicate chunk IDs: {duplicate_chunk_ids or 'none'}")
+    print(f"Document hash references: {sum(document_hashes.values())}")
     print(f"Broken previous/next links: {broken_links}")
     print(f"Top semantic tags: {tags.most_common(10)}")
     print(f"Top financial metrics: {metrics.most_common(10)}")
-    print(f"Tables: {sum(r['metadata'].get('contains_table') == 'true' for r in records)}")
-    print(f"Financial tables: {sum(r['metadata'].get('contains_financial_table') == 'true' for r in records)}")
-    print(f"Charts: {sum(r['metadata'].get('contains_chart') == 'true' for r in records)}")
+    print(f"Tables: {sum(r['metadata'].get('is_table') is True or r['metadata'].get('contains_table') == 'true' for r in records)}")
+    print(f"Financial tables: {sum(r['metadata'].get('is_financial_table') is True or r['metadata'].get('contains_financial_table') == 'true' for r in records)}")
+    print(f"Charts: {sum(r['metadata'].get('is_chart') is True or r['metadata'].get('contains_chart') == 'true' for r in records)}")
     print(f"Average chunk size: {sum(sizes) / len(sizes):.1f} words" if sizes else "Average chunk size: 0 words")
     print(f"Embedding dimensions: {dimensions or 'N/A'}")
     
@@ -84,8 +85,8 @@ def summarize(collection) -> None:
         print(f"  Documents: {analysis_docs}")
         print(f"  Sources: {', '.join(analysis_sources) or '<unknown>'}")
         print(f"  Companies: {', '.join(analysis_companies) or '<unknown>'}")
-        print(f"  Tables: {sum(r['metadata'].get('contains_table') == 'true' for r in analysis_records)}")
-        print(f"  Financial Tables: {sum(r['metadata'].get('contains_financial_table') == 'true' for r in analysis_records)}")
+        print(f"  Tables: {sum(r['metadata'].get('is_table') is True or r['metadata'].get('contains_table') == 'true' for r in analysis_records)}")
+        print(f"  Financial Tables: {sum(r['metadata'].get('is_financial_table') is True or r['metadata'].get('contains_financial_table') == 'true' for r in analysis_records)}")
 
 
 if __name__ == "__main__":

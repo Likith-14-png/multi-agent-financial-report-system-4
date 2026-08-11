@@ -41,13 +41,38 @@ def test_duplicate_document_is_skipped(tmp_path):
     agent = DocumentAgent(config)
 
     sample_path = Path(__file__).resolve().parents[1] / "scripts" / "demo_data" / "2024_Annual_Report.pdf"
-    first = agent.ingest_document(str(sample_path))
-    second = agent.ingest_document(str(sample_path), analysis_id="another-analysis")
+    analysis_id = agent.create_analysis()
+    first = agent.ingest_document(str(sample_path), analysis_id=analysis_id)
+    second = agent.ingest_document(str(sample_path), analysis_id=analysis_id)
 
     assert first["status"] == "success"
     assert second["status"] == "success"
     assert second["duplicates_skipped"] is True
     assert second["chunks"] == 0
+
+
+def test_same_document_can_be_indexed_in_new_analysis(tmp_path):
+    db_path = tmp_path / "chroma_db"
+    config = DocumentAgentConfig(
+        db_path=str(db_path),
+        collection_name="test_collection_duplicate_across_analyses",
+        chunk_size=800,
+        chunk_overlap=150,
+        overwrite=False,
+    )
+    agent = DocumentAgent(config)
+
+    sample_path = Path(__file__).resolve().parents[1] / "scripts" / "demo_data" / "2024_Annual_Report.pdf"
+    first = agent.ingest_document(str(sample_path), analysis_id="analysis-one")
+    second = agent.ingest_document(str(sample_path), analysis_id="analysis-two")
+
+    assert first["status"] == "success"
+    assert first["chunks"] >= 1
+    assert second["status"] == "success"
+    assert second["duplicates_skipped"] is False
+    assert second["chunks"] == first["chunks"]
+    assert agent.get_documents_by_analysis("analysis-one")["total_chunks"] == first["chunks"]
+    assert agent.get_documents_by_analysis("analysis-two")["total_chunks"] == second["chunks"]
 
 
 def test_duplicate_content_with_different_filename_is_skipped(tmp_path):
@@ -67,8 +92,9 @@ def test_duplicate_content_with_different_filename_is_skipped(tmp_path):
     first_path.write_text(report_text, encoding="utf-8")
     second_path.write_text(report_text, encoding="utf-8")
 
-    first = agent.ingest_document(str(first_path))
-    second = agent.ingest_document(str(second_path))
+    analysis_id = agent.create_analysis()
+    first = agent.ingest_document(str(first_path), analysis_id=analysis_id)
+    second = agent.ingest_document(str(second_path), analysis_id=analysis_id)
 
     assert first["status"] == "success"
     assert first["chunks"] >= 1

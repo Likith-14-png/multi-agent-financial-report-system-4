@@ -13,8 +13,12 @@ from shared_chroma_path import resolve_chroma_db_path
 COLLECTION_NAME = "financial_research_2024"
 ENTERPRISE_FIELDS: Set[str] = {
     "company_name",
+    "document_id",
+    "doc_type",
     "company_index",
     "document_title",
+    "report_year",
+    "report_period",
     "financial_year",
     "page_number",
     "page_start",
@@ -27,6 +31,9 @@ ENTERPRISE_FIELDS: Set[str] = {
     "document_version",
     "previous_chunk_id",
     "next_chunk_id",
+    "is_table",
+    "is_financial_table",
+    "is_chart",
 }
 
 

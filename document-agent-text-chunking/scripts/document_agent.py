@@ -4,17 +4,31 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from metadata_validator import MetadataValidator
 from shared_chroma_path import resolve_chroma_db_path
+
+try:
+    import fitz  # type: ignore[import]
+except ImportError:
+    fitz = None  # type: ignore[assignment]
+
+try:
+    import spacy  # type: ignore[import]
+except ImportError:
+    spacy = None  # type: ignore[assignment]
 
 try:
     import PyPDF2
@@ -60,6 +74,8 @@ class IngestionResult:
     collection: str
     duplicates_skipped: bool
     error: Optional[str] = None
+    quality_report: Optional[Dict[str, Any]] = None
+    message: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         result = dict(self.__dict__)
@@ -93,6 +109,19 @@ class DocumentAgent:
             embedding_function=self.embedding_fn,
             metadata={"description": "Generic financial research document chunks"},
         )
+        self._nlp = self._load_spacy_model()
+
+    @staticmethod
+    def _load_spacy_model() -> Any:
+        if spacy is None:
+            return None
+        for model_name in ("en_core_web_sm", "en_core_web_trf"):
+            try:
+                return spacy.load(model_name)
+            except Exception:
+                continue
+        logger.warning("spaCy is installed but no English model is available; organizations/products will stay conservative")
+        return None
 
     def generate_embedding(self, text: str) -> List[float]:
         return list(self.embedding_fn([text])[0])
@@ -125,9 +154,29 @@ class DocumentAgent:
 
     @staticmethod
     def clean_text(text: str) -> str:
+        text = DocumentAgent.normalize_text(text)
         text = "".join(c for c in text if c.isprintable() or c in "\n\t")
         text = re.sub(r"[ \t]+", " ", text)
         return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        """Normalize Unicode artifacts before metadata extraction."""
+        normalized = unicodedata.normalize("NFKC", text or "")
+        replacements = {
+            "â€“": "-",
+            "â€”": "-",
+            "â€˜": "'",
+            "â€™": "'",
+            "â€œ": '"',
+            "â€�": '"',
+            "â‚¬": "EUR",
+            "Â£": "GBP",
+            "â‚¹": "INR",
+        }
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        return normalized
 
     def _resolve_file_path(self, value: str) -> Path:
         path = Path(value)
@@ -234,8 +283,27 @@ class DocumentAgent:
         return "\n\n".join(record["text"] for record in records), records
 
     def _extract_pdf_text(self, path: Path) -> Tuple[str, List[Dict[str, Any]]]:
+        if fitz is not None:
+            logger.info("Extracting text from PDF with PyMuPDF %s", path.name)
+            try:
+                with fitz.open(path) as document:
+                    raw_pages = [self.clean_text(page.get_text("text") or "") for page in document]
+            except Exception as exc:
+                logger.warning("PyMuPDF extraction failed for %s, trying PyPDF2: %s", path.name, exc)
+            else:
+                pages = self._remove_repeated_margins(raw_pages)
+                records = []
+                for number, page in enumerate(pages, 1):
+                    cleaned = self.clean_text(page)
+                    if cleaned:
+                        records.append({"page_number": number, "text": cleaned, "content_length": len(cleaned)})
+                if records:
+                    return "\n\n".join(record["text"] for record in records), records
+                if self.config.ocr_callback:
+                    logger.info("PyMuPDF found no readable text, falling back to OCR for %s", path.name)
+                    return self._extract_with_ocr(path)
         if PyPDF2 is None:
-            raise ImportError("PyPDF2 is required for PDF ingestion") from _IMPORT_ERROR
+            raise ImportError("PyMuPDF or PyPDF2 is required for PDF ingestion") from _IMPORT_ERROR
         logger.info("Extracting text from PDF %s", path.name)
         try:
             with path.open("rb") as handle:
@@ -479,33 +547,56 @@ class DocumentAgent:
         document_evidence = f"{cover}\n{path.stem.replace('_', ' ')}"
         title = pdf_metadata.get("title", "")
         if not title:
-            title_match = re.search(r"(?im)^\s*(.{2,120}(?:annual|integrated|sustainability|esg|proxy|quarterly|earnings|10-k|10-q) (?:report|statement|filing).{0,80})\s*$", document_evidence)
+            title_match = re.search(r"(?im)^\s*(.{2,120}(?:annual|integrated|sustainability|esg|quarterly|earnings|transcript|10-k|10-q|20-f) (?:report|statement|filing|transcript).{0,80})\s*$", document_evidence)
             title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
         if title and len(title) > 200:
             title = title[:200].strip()
-        company = self._extract_company_name(cover, pdf_metadata=pdf_metadata, pages=pages)
-        financial_year = self._extract_financial_year(document_evidence)
+        company = self._extract_company_name(cover, pdf_metadata=pdf_metadata, pages=pages) or "Unknown"
+        if company == "Unknown":
+            logger.warning("Unable to confidently determine company_name for %s", path.name)
+        report_year, report_period = self._extract_report_year_and_period(document_evidence)
         report_type = self._infer_report_type(document_evidence)
-        period_match = re.search(r"\b((?:Q[1-4])\s*(?:FY)?\s*(?:19|20)?\d{2})\b|\b(?:year ended|fiscal year ended)\s+([A-Za-z]+\s+\d{1,2},?\s+(?:19|20)\d{2})", document_evidence, re.I)
         filing_match = re.search(r"\b(?:filed|filing date|report date|dated)\s*[:\-]?\s*([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", cover, re.I)
         boundary = re.findall(r"\b(?:beginning|starting|ended|ending)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}[-/]\d{2}[-/]\d{2})", cover, re.I)
         currency = re.search(r"\b(USD|INR|EUR|GBP|JPY|CAD|AUD)\b|([$€£₹])", cover, re.I)
         language = "English" if len(re.findall(r"\b(?:the|and|of|for|financial|report|corporate|company)\b", cover, re.I)) >= 5 else ""
-        industry_match = re.search(r"\b(?:industry|sector)\s*[:\-]\s*([^\n,;]{2,80})", cover, re.I)
+        industry = self._extract_industry(cover)
         return {
             "document_title": title,
             "report_title": title,
             "company_name": company,
-            "financial_year": financial_year,
+            "financial_year": report_year,
+            "report_year": report_year,
             "report_type": report_type,
-            "report_period": (period_match.group(1).upper().replace("FY", "FY") if period_match and period_match.group(1) else (period_match.group(2).strip() if period_match and period_match.group(2) else "")),
+            "report_period": report_period,
             "filing_date": filing_match.group(1) if filing_match else "",
             "document_language": language,
             "fiscal_year_start": boundary[0] if boundary else "",
             "fiscal_year_end": boundary[-1] if len(boundary) > 1 else (boundary[0] if boundary else ""),
             "currency": (currency.group(1) or {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}.get(currency.group(2), "")) if currency else "",
-            "industry": industry_match.group(1).strip() if industry_match else "",
+            "industry": industry,
         }
+
+    @staticmethod
+    def _extract_industry(text: str) -> str:
+        allowed = {
+            "banking": "Banking",
+            "financial services": "Financial Services",
+            "information technology": "Information Technology",
+            "industrial automation": "Industrial Automation",
+            "technology": "Information Technology",
+            "automotive": "Automotive",
+            "energy": "Energy",
+            "healthcare": "Healthcare",
+            "manufacturing": "Manufacturing",
+        }
+        for match in re.finditer(r"\b(?:industry|sector|business classification)\s*[:\-]\s*([^\n.;]{2,60})", text, re.I):
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" ,")
+            lowered = candidate.lower()
+            for key, value in allowed.items():
+                if re.fullmatch(rf".*\b{re.escape(key)}\b.*", lowered):
+                    return value
+        return ""
 
     @staticmethod
     def _named_values(text: str, labels: Sequence[str]) -> str:
@@ -515,6 +606,30 @@ class DocumentAgent:
         for match in re.finditer(rf"(?:{label_pattern})\s*(?:include|are|:)?\s*([^.;\n]+)", text, re.I):
             matches.extend(re.findall(r"\b[A-Z][A-Za-z0-9&.-]{1,30}(?:\s+[A-Z][A-Za-z0-9&.-]{1,30}){0,3}\b", match.group(1)))
         return DocumentAgent._csv(matches)
+
+    def _extract_organizations(self, text: str) -> str:
+        nlp = getattr(self, "_nlp", None)
+        if nlp is None:
+            return ""
+        blocked = re.compile(r"\b(?:chief|officer|director|committee|annexure|program|initiative|department|segment|division|risk|governance|employee|financial year|annual report)\b", re.I)
+        organizations = []
+        for entity in nlp(text[:6000]).ents:
+            value = re.sub(r"\s+", " ", entity.text).strip(" ,.;:-")
+            if entity.label_ == "ORG" and 2 <= len(value) <= 80 and not blocked.search(value):
+                organizations.append(value)
+        return self._csv(organizations)
+
+    @staticmethod
+    def _extract_products(text: str) -> str:
+        products: List[str] = []
+        blocked = re.compile(r"\b(?:customer segments?|products and services|business|operations|report|annexure|governance|risk|committee)\b", re.I)
+        for match in re.finditer(r"\b(?:products?|services?|offerings?)\s+(?:include|comprise|consist of|are)\s+([^.\n;]{3,180})", text, re.I):
+            phrase = match.group(1)
+            for item in re.split(r",|\band\b", phrase):
+                value = re.sub(r"\s+", " ", item).strip(" .;:-")
+                if 2 <= len(value.split()) <= 6 and not blocked.search(value):
+                    products.append(value)
+        return DocumentAgent._csv(products)
 
     @staticmethod
     def _normalize_heading(text: str) -> str:
@@ -709,38 +824,67 @@ class DocumentAgent:
 
     @staticmethod
     def _extract_financial_year(text: str) -> str:
+        return DocumentAgent._extract_report_year_and_period(text)[0]
+
+    @staticmethod
+    def _expand_two_digit_year(value: str) -> str:
+        value = value.strip()
+        return f"20{value}" if len(value) == 2 else value
+
+    @staticmethod
+    def _extract_report_year_and_period(text: str) -> Tuple[str, str]:
+        normalized = DocumentAgent.normalize_text(text)
         patterns = [
-            r"\b(?:fiscal|financial)\s+year\s+(?:ended|ending)?\s*(?:\w+\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
-            r"\byear\s+ended\s+(?:\w+\s+\d{1,2},?\s+)?((?:19|20)\d{2})\b",
-            r"\b(?:annual|integrated|sustainability|proxy|quarterly)\s+report\s+((?:19|20)\d{2})\b",
-            r"\b(?:FY|Q[1-4]\s*FY?)\s*((?:19|20)?\d{2})\b",
+            r"\b(?:year|fiscal year|financial year)\s+ended\s+([A-Za-z]+\s+\d{1,2},?\s+((?:19|20)\d{2}))\b",
+            r"\b(?:fiscal|financial)\s+year\s+(?:ended|ending)?\s*(?:[A-Za-z]+\s+\d{1,2},?\s+)?((?:19|20)\d{2})(?:\s*[-/]\s*(\d{2}))?\b",
+            r"\bFY\s*((?:19|20)?\d{2})(?:\s*[-/]\s*(\d{2}))?\b",
+            r"\b((?:19|20)\d{2})\s*[-/]\s*(\d{2})\b",
+            r"\b(?:annual|integrated|sustainability|financial)\s+report\s+((?:19|20)\d{2})(?:\s*[-/]\s*(\d{2}))?\b",
+            r"\bQ[1-4]\s*(?:FY)?\s*((?:19|20)?\d{2})\b",
         ]
         for pattern in patterns:
-            match = re.search(pattern, text, re.I)
-            if match:
-                year = match.group(1)
-                return f"20{year}" if len(year) == 2 else year
-        years = [int(year) for year in re.findall(r"\b((?:19|20)\d{2})\b", text)]
+            match = re.search(pattern, normalized, re.I)
+            if not match:
+                continue
+            groups = [group for group in match.groups() if group]
+            if len(groups) >= 2 and re.search(r"[A-Za-z]", groups[0]):
+                return groups[1], groups[0]
+            start_year = DocumentAgent._expand_two_digit_year(groups[0])
+            if len(groups) >= 2 and groups[1].isdigit() and len(groups[1]) == 2:
+                return start_year, f"{start_year}-{groups[1]}"
+            return start_year, match.group(0).strip()
+        years = [int(year) for year in re.findall(r"\b((?:19|20)\d{2})\b", normalized)]
         plausible = [year for year in years if 1990 <= year <= datetime.now().year + 1]
-        return str(max(plausible)) if plausible else ""
+        if plausible:
+            year = str(max(plausible))
+            return year, year
+        logger.warning("Unable to confidently determine report_year from document content")
+        return "Unknown", "Unknown"
 
     def _infer_report_type(self, text: str) -> str:
-        cleaned = re.sub(r"\s+", " ", text).strip()
-        lowered = cleaned.lower()
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if re.sub(r"\s+", " ", line).strip()]
+        evidence = " ".join(lines[:80])
+        lowered = evidence.lower()
         if re.search(r"\b10-k\b", lowered):
             return "10-K"
         if re.search(r"\b10-q\b", lowered):
             return "10-Q"
-        if re.search(r"\bproxy\b|definitive proxy statement|annual meeting of shareholders", lowered):
-            return "Proxy Statement"
+        if re.search(r"\b20-f\b", lowered):
+            return "20-F"
+        if re.search(r"\bannual report\b|\bform 10-k\b|\bannual\s+report\s+(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[-/]\s*\d{2}\s+annual report\b", lowered):
+            return "Annual Report"
         if re.search(r"\bintegrated report\b|\bintegrated annual report\b", lowered):
             return "Integrated Report"
         if re.search(r"\bsustainability report\b|\besg report\b|\benvironmental,? social,? and governance report\b", lowered):
             return "Sustainability Report"
+        if re.search(r"\bearnings transcript\b|\btranscript\b", lowered):
+            return "Earnings Transcript"
         if re.search(r"\bquarterly report\b|\bquarter ended\b|\bq[1-4]\b", lowered):
-            return "Quarterly Report"
-        if re.search(r"\bannual report\b|\bform 10-k\b", lowered):
-            return "Annual Report"
+            return "10-Q"
+        if re.search(r"\bfinancial report\b|\bfinancial statements?\b", lowered):
+            return "Financial Report"
+        if re.search(r"\bearnings report\b|\bearnings release\b|\bresults\b", lowered):
+            return "Earnings Report"
         return "Other"
 
     def _extract_section_heading_and_type(self, text: str) -> Tuple[str, str]:
@@ -790,42 +934,27 @@ class DocumentAgent:
     def _financial_metric_mapping() -> dict[str, str]:
         return {
             r"\brevenue\b": "Revenue",
+            r"\bnet income\b": "Net Income",
             r"\boperating income\b": "Operating Income",
             r"\bgross profit\b": "Gross Profit",
             r"\bgross margin\b": "Gross Margin",
             r"\b(?:ebitda|e\.b\.i\.t\.d\.a\.)\b": "EBITDA",
-            r"\b(?:ebit|e\.b\.i\.t\.)\b": "EBIT",
-            r"\bcash flow\b": "Cash Flow",
+            r"\b(?:earnings per share|eps|diluted eps)\b": "EPS",
+            r"\btotal assets\b|\bassets\b": "Total Assets",
+            r"\btotal liabilities\b|\bliabilities\b": "Total Liabilities",
+            r"\btotal equity\b|\bshareholders'? equity\b|\bstockholders'? equity\b": "Total Equity",
+            r"\bdebt\b|\bborrowings?\b": "Debt",
+            r"\bcash and cash equivalents\b|\bcash\b": "Cash",
             r"\boperating cash flow\b": "Operating Cash Flow",
             r"\bfree cash flow\b": "Free Cash Flow",
-            r"\beps\b": "EPS",
-            r"\bdiluted eps\b": "Diluted EPS",
-            r"\bcapex\b": "CapEx",
-            r"\bcapital expenditure\b": "CapEx",
+            r"\bcapex\b|\bcapital expenditure\b": "Capital Expenditure",
             r"\b(?:r\s*&\s*d|research and development)\b": "R&D",
-            r"\bshare repurchases?\b": "Share Repurchases",
-            r"\bbuyback\b": "Share Repurchases",
             r"\bdividend\b": "Dividend",
-            r"\btax expense\b": "Tax Expense",
-            r"\bnet income\b": "Net Income",
-            r"\bworking capital\b": "Working Capital",
-            r"\bdebt\b": "Debt",
-            r"\bequity\b": "Equity",
-            r"\binventory\b": "Inventory",
-            r"\baccounts receivable\b": "Accounts Receivable",
-            r"\baccounts payable\b": "Accounts Payable",
-            r"\bgoodwill\b": "Goodwill",
-            r"\bintangible assets\b": "Intangible Assets",
-            r"\bsegment revenue\b": "Segment Revenue",
             r"\boperating margin\b": "Operating Margin",
-            r"\breturn on equity\b": "Return on Equity",
-            r"\breturn on assets\b": "Return on Assets",
+            r"\bnet margin\b": "Net Margin",
+            r"\breturn on equity\b|\broe\b": "ROE",
+            r"\breturn on assets\b|\broa\b": "ROA",
             r"\bliquidity\b": "Liquidity",
-            r"\bleverage\b": "Leverage",
-            r"\bgrowth rate\b": "Growth Rate",
-            r"\bgrowth\b": "Growth Rate",
-            r"\bassets\b": "Assets",
-            r"\bliabilities\b": "Liabilities",
         }
 
     def _extract_financial_metrics(self, text: str) -> str:
@@ -840,29 +969,26 @@ class DocumentAgent:
     @staticmethod
     def _semantic_tag_mapping() -> dict[str, Tuple[str, ...]]:
         return {
-            "Cloud": (r"\bcloud\b", r"\bazure\b", r"\binfrastructure\b", r"\bdata center\b", r"\bdata centre\b"),
-            "Artificial Intelligence": (r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bai\b", r"\bdeep learning\b"),
-            "Cybersecurity": (r"\bcybersecurity\b", r"\bsecurity\b", r"\bcyber risk\b"),
-            "Gaming": (r"\bgaming\b", r"\bgame\b", r"\bconsole\b"),
-            "Advertising": (r"\badvertis(?:ing|ement)\b", r"\bads\b"),
-            "Azure": (r"\bazure\b",),
-            "Microsoft 365": (r"\bmicrosoft 365\b", r"\boffice 365\b"),
-            "Office": (r"\boffice\b",),
-            "Developer Tools": (r"\bdeveloper tools\b", r"\bdeveloper platform\b", r"\bdev tools\b"),
-            "GitHub": (r"\bgithub\b",),
-            "Enterprise": (r"\benterprise\b", r"\benterprise software\b"),
-            "Productivity": (r"\bproductivity\b",),
-            "Infrastructure": (r"\binfrastructure\b", r"\bplatform\b", r"\bservices?\b"),
-            "Investment": (r"\binvestment\b", r"\bcapital markets\b", r"\bcapital expenditure\b", r"\bcapex\b"),
+            "Financial Performance": (r"\bfinancial performance\b", r"\brevenue\b", r"\bnet income\b", r"\bearnings\b"),
+            "Revenue": (r"\brevenue\b", r"\bsales\b"),
+            "Profitability": (r"\bprofitability\b", r"\bmargin\b", r"\bnet income\b", r"\bgross profit\b"),
+            "Liquidity": (r"\bliquidity\b", r"\bcash\b", r"\bworking capital\b"),
+            "Debt": (r"\bdebt\b", r"\bborrowings?\b", r"\bleverage\b"),
+            "Investment": (r"\binvestment\b", r"\bcapital expenditure\b", r"\bcapex\b"),
             "Risk": (r"\brisk\b", r"\brisk factors\b"),
             "Compliance": (r"\bcompliance\b", r"\bregulator|regulatory\b"),
-            "Sustainability": (r"\bsustainability\b", r"\besg\b", r"\benvironmental\b", r"\bsocial\b"),
-            "Supply Chain": (r"\bsupply chain\b", r"\blogistics\b"),
-            "Manufacturing": (r"\bmanufactur(?:ing|er)\b",),
-            "Consumer": (r"\bconsumer\b", r"\bretail\b"),
-            "Automotive": (r"\bautomotive\b", r"\bvehicle\b", r"\bauto\b"),
-            "Energy": (r"\benergy\b", r"\bpower\b", r"\brenewable\b"),
-            "Healthcare": (r"\bhealthcare\b", r"\bmedical\b", r"\bpharma\b"),
+            "Sustainability": (r"\bsustainability\b", r"\benvironmental\b", r"\bsocial\b"),
+            "ESG": (r"\besg\b", r"\benvironmental,? social,? and governance\b"),
+            "Cybersecurity": (r"\bcybersecurity\b", r"\bsecurity\b", r"\bcyber risk\b"),
+            "Cloud": (r"\bcloud\b", r"\bazure\b"),
+            "Artificial Intelligence": (r"\bartificial intelligence\b", r"\bmachine learning\b", r"\bai\b", r"\bdeep learning\b"),
+            "Operations": (r"\boperations?\b", r"\bmanufactur(?:ing|er)\b", r"\bsupply chain\b"),
+            "Strategy": (r"\bstrategy\b", r"\bstrategic\b", r"\boutlook\b"),
+            "Employees": (r"\bemployees?\b", r"\bworkforce\b", r"\bassociates\b"),
+            "Governance": (r"\bgovernance\b", r"\bboard of directors\b"),
+            "Audit": (r"\baudit\b", r"\bauditor\b", r"\baudited\b"),
+            "Cash Flow": (r"\bcash flows?\b", r"\boperating cash flow\b", r"\bfree cash flow\b"),
+            "Capital Allocation": (r"\bcapital allocation\b", r"\bdividend\b", r"\bshare repurchase\b", r"\bbuyback\b"),
         }
 
     def _extract_semantic_tags(self, text: str) -> str:
@@ -927,11 +1053,12 @@ class DocumentAgent:
 
     def _build_chunk_metadata(self, path: Path, doc_hash: str, chunks: List[Dict[str, Any]], analysis_id: str, pages: List[Dict[str, Any]], ids: List[str], full_text: str) -> List[Dict[str, Any]]:
         doc = self._document_metadata(path, full_text, pages)
+        document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
         result = []
         timestamp = datetime.now(timezone.utc).isoformat()
         for index, chunk_record in enumerate(chunks):
             chunk = chunk_record["text"]
-            section_title = chunk_record.get("section_title", "") or ""
+            section_title = chunk_record.get("section_title", "") or "Unknown"
             section_type = chunk_record.get("section_type", "other") or "other"
             table, financial_table, table_type, table_rows, table_columns = self._table_profile(chunk)
             if not table:
@@ -950,25 +1077,32 @@ class DocumentAgent:
             organizations = self._named_values(surrounding_text, ("companies", "organizations", "partners", "customer", "customers"))
             products = self._named_values(surrounding_text, ("products", "services", "platforms", "offerings"))
             business_segments = self._named_values(surrounding_text, ("segments", "business segments", "operating segments"))
-            confidence = round(sum(bool(value) for value in (doc["company_name"], doc["financial_year"], section_title, values)) / 4, 2)
+            confidence = round(sum(value not in ("", "Unknown", None) for value in (doc["company_name"], doc["report_year"], section_title, values)) / 4, 2)
             sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", chunk) if sentence.strip()]
             paragraphs = [paragraph for paragraph in re.split(r"\n\s*\n", chunk) if paragraph.strip()]
             chunk_type = "financial_table" if financial_table else ("risk" if section_type == "risk" else ("md&a" if section_type == "management_discussion" else section_type if section_type in {"notes", "governance", "sustainability", "appendix", "chart", "business", "cover", "financial_statement"} else "narrative"))
-            semantic_tags = self._extract_semantic_tags(surrounding_text)
-            financial_metrics = self._extract_financial_metrics(surrounding_text)
-            chunk_summary = f"Discusses {financial_metrics.lower()}." if financial_metrics else (f"Discusses {section_title.lower()}." if section_title else "Contains report information.")
+            semantic_tags = self._extract_semantic_tags(chunk)
+            financial_metrics = self._extract_financial_metrics(chunk)
+            chunk_summary = f"Discusses {financial_metrics.lower()}." if financial_metrics else (f"Discusses {section_title.lower()}." if section_title != "Unknown" else "Contains report information.")
             chunk_summary = " ".join(chunk_summary.split()[:25])
+            page_start = min(page_numbers) if page_numbers else 0
+            page_end = max(page_numbers) if page_numbers else 0
+            page_number = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
+            is_chart = self._contains_chart(chunk)
             metadata: Dict[str, Any] = {
                 "analysis_id": analysis_id,
+                "document_id": document_id,
                 "source": path.name,
                 "doc_hash": doc_hash,
+                "doc_type": doc["report_type"],
                 "chunk_id": ids[index],
                 "chunk_index": index,
                 "total_chunks": len(chunks),
                 "previous_chunk_id": ids[index - 1] if index else "",
                 "next_chunk_id": ids[index + 1] if index + 1 < len(chunks) else "",
-                "page_start": min(page_numbers) if page_numbers else 0,
-                "page_end": max(page_numbers) if page_numbers else 0,
+                "page_number": page_number,
+                "page_start": page_start,
+                "page_end": page_end,
                 "page_numbers": self._csv(map(str, page_numbers)),
                 "content_length": len(chunk),
                 "word_count": len(chunk.split()),
@@ -980,6 +1114,7 @@ class DocumentAgent:
                 "report_title": doc["report_title"],
                 "document_language": doc["document_language"],
                 "report_type": doc["report_type"],
+                "report_year": doc["report_year"],
                 "financial_year": doc["financial_year"],
                 "report_period": doc["report_period"],
                 "filing_date": doc["filing_date"],
@@ -988,6 +1123,7 @@ class DocumentAgent:
                 "currency": doc["currency"],
                 "document_version": "1",
                 "section_title": section_title,
+                "subsection_title": "",
                 "section_type": section_type,
                 "chunk_type": chunk_type,
                 "chunk_summary": chunk_summary[:240],
@@ -1006,18 +1142,192 @@ class DocumentAgent:
                 "business_segments": business_segments,
                 "investment_keywords": self._matches(surrounding_text, ("investment", "capital expenditure", "share buyback", "share repurchase", "dividend", "guidance")),
                 "risks": self._matches(surrounding_text, ("cybersecurity", "competition", "regulation", "inflation", "interest rates", "supply chain", "litigation")),
+                "is_table": bool(table),
+                "is_financial_table": bool(financial_table),
+                "is_chart": bool(is_chart),
                 "contains_table": str(table).lower(),
                 "table_type": table_type,
                 "contains_financial_table": str(financial_table).lower(),
                 "table_rows": table_rows,
                 "table_columns": table_columns,
-                "contains_chart": str(self._contains_chart(surrounding_text)).lower(),
+                "contains_chart": str(is_chart).lower(),
                 "contains_footnotes": str(bool(re.search(r"\bfootnotes?\b|notes to", surrounding_text, re.I))).lower(),
                 "is_audited": self._matches(surrounding_text, ("audited", "unaudited")),
                 "ingestion_timestamp": timestamp,
             }
             result.append(metadata)
         return result
+
+    @staticmethod
+    def validate_metadata(metadatas: List[Dict[str, Any]]) -> Dict[str, Any]:
+        required = (
+            "analysis_id",
+            "document_id",
+            "doc_hash",
+            "source",
+            "doc_type",
+            "company_name",
+            "report_year",
+            "report_period",
+            "report_type",
+            "page_number",
+            "chunk_index",
+            "total_chunks",
+            "section_title",
+            "subsection_title",
+            "content_length",
+            "ingestion_timestamp",
+        )
+        report_types = {"Annual Report", "10-K", "10-Q", "Integrated Report", "Sustainability Report", "Financial Report", "Earnings Report", "Proxy Statement", "Other"}
+        ids_by_chunk_id = {metadata.get("chunk_id"): metadata for metadata in metadatas if metadata.get("chunk_id")}
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        for metadata in metadatas:
+            grouped[(str(metadata.get("analysis_id", "")), str(metadata.get("document_id", "")))].append(metadata)
+
+        missing = Counter(
+            field
+            for metadata in metadatas
+            for field in required
+            if field not in metadata or metadata.get(field) in ("", None)
+        )
+        invalid_report_types = sum(1 for metadata in metadatas if metadata.get("report_type") not in report_types)
+        invalid_report_years = sum(
+            1
+            for metadata in metadatas
+            if metadata.get("report_year") != "Unknown" and not re.fullmatch(r"(?:19|20)\d{2}", str(metadata.get("report_year", "")))
+        )
+        invalid_pages = sum(1 for metadata in metadatas if not metadata.get("page_number") or int(metadata.get("page_start") or 0) <= 0 or int(metadata.get("page_end") or 0) < int(metadata.get("page_start") or 0))
+        broken_previous = 0
+        broken_next = 0
+        cross_document_links = 0
+        cross_analysis_links = 0
+        invalid_sequences = 0
+
+        for (analysis_id, document_id), records in grouped.items():
+            records.sort(key=lambda item: int(item.get("chunk_index", -1)))
+            expected_total = len(records)
+            for expected_index, metadata in enumerate(records):
+                if metadata.get("chunk_index") != expected_index or metadata.get("total_chunks") != expected_total:
+                    invalid_sequences += 1
+                for field, counter_name in (("previous_chunk_id", "previous"), ("next_chunk_id", "next")):
+                    linked_id = metadata.get(field)
+                    if not linked_id:
+                        continue
+                    linked = ids_by_chunk_id.get(linked_id)
+                    if not linked:
+                        if counter_name == "previous":
+                            broken_previous += 1
+                        else:
+                            broken_next += 1
+                        continue
+                    if linked.get("document_id") != document_id:
+                        cross_document_links += 1
+                    if linked.get("analysis_id") != analysis_id:
+                        cross_analysis_links += 1
+
+        filled = sum(1 for metadata in metadatas for field in required if field in metadata and metadata.get(field) not in ("", None))
+        possible = len(metadatas) * len(required)
+        duplicate_doc_hashes = sum(max(0, count - 1) for count in Counter((m.get("analysis_id"), m.get("doc_hash")) for m in metadatas).values())
+        duplicate_chunk_ids = sum(count - 1 for count in Counter(m.get("chunk_id") for m in metadatas if m.get("chunk_id")).values() if count > 1)
+
+        return {
+            "total_chunks": len(metadatas),
+            "metadata_completeness": round((filled / possible) * 100, 2) if possible else 0.0,
+            "missing_fields": dict(missing),
+            "invalid_report_types": invalid_report_types,
+            "invalid_report_years": invalid_report_years,
+            "invalid_pages": invalid_pages,
+            "invalid_sequences": invalid_sequences,
+            "broken_previous_links": broken_previous,
+            "broken_next_links": broken_next,
+            "cross_document_links": cross_document_links,
+            "cross_analysis_links": cross_analysis_links,
+            "duplicate_document_hash_references": duplicate_doc_hashes,
+            "duplicate_chunk_ids": duplicate_chunk_ids,
+        }
+
+    def build_quality_report(self, metadatas: List[Dict[str, Any]], duplicate_documents_skipped: int = 0) -> Dict[str, Any]:
+        validation = self.validate_metadata(metadatas)
+        documents = {}
+        for metadata in metadatas:
+            document_id = metadata.get("document_id")
+            if document_id and document_id not in documents:
+                documents[document_id] = {
+                    "company_name": metadata.get("company_name", "Unknown"),
+                    "report_year": metadata.get("report_year", "Unknown"),
+                    "report_type": metadata.get("report_type", "Other"),
+                    "source": metadata.get("source", ""),
+                }
+
+        def pct(field: str, allow_empty: bool = False) -> float:
+            if not metadatas:
+                return 0.0
+            present = sum(1 for metadata in metadatas if metadata.get(field) not in (None, "") and (allow_empty or metadata.get(field) != "Unknown"))
+            return round((present / len(metadatas)) * 100, 2)
+
+        report = {
+            "analysis_id": metadatas[0].get("analysis_id") if metadatas else "",
+            "total_documents": len(documents),
+            "total_chunks": len(metadatas),
+            "documents": list(documents.values()),
+            "metadata_completeness": {
+                "company_name": pct("company_name"),
+                "report_year": pct("report_year"),
+                "report_type": pct("report_type", allow_empty=True),
+                "section_title": pct("section_title"),
+                "page_number": pct("page_number", allow_empty=True),
+                "financial_metrics": pct("financial_metrics", allow_empty=True),
+                "semantic_tags": pct("semantic_tags", allow_empty=True),
+            },
+            "broken_chunk_links": validation["broken_previous_links"] + validation["broken_next_links"],
+            "cross_document_links": validation["cross_document_links"],
+            "cross_analysis_links": validation["cross_analysis_links"],
+            "duplicate_documents_skipped": duplicate_documents_skipped,
+            "embedding_model": self.config.embedding_model_name,
+            "embedding_dimensions": 384 if self.config.embedding_model_name == "all-MiniLM-L6-v2" else "Unknown",
+            "validation": validation,
+        }
+        return report
+
+    @staticmethod
+    def format_quality_report(report: Dict[str, Any]) -> str:
+        completeness = report.get("metadata_completeness", {})
+        documents = report.get("documents", [])
+        lines = [
+            "=" * 48,
+            "DOCUMENT INGESTION QUALITY REPORT",
+            "=" * 48,
+            f"Analysis ID: {report.get('analysis_id', '')}",
+            "",
+            f"Total Documents: {report.get('total_documents', 0)}",
+            f"Total Chunks: {report.get('total_chunks', 0)}",
+            "",
+            "Documents:",
+        ]
+        lines.extend(
+            f"- {doc.get('company_name', 'Unknown')} {doc.get('report_year', 'Unknown')} {doc.get('report_type', 'Other')} ({doc.get('source', '')})"
+            for doc in documents
+        )
+        lines.extend([
+            "",
+            "Metadata completeness:",
+            f"Company Name: {completeness.get('company_name', 0)}%",
+            f"Report Year: {completeness.get('report_year', 0)}%",
+            f"Report Type: {completeness.get('report_type', 0)}%",
+            f"Section Title: {completeness.get('section_title', 0)}%",
+            f"Page Number: {completeness.get('page_number', 0)}%",
+            f"Financial Metrics: {completeness.get('financial_metrics', 0)}%",
+            f"Semantic Tags: {completeness.get('semantic_tags', 0)}%",
+            "",
+            f"Broken chunk links: {report.get('broken_chunk_links', 0)}",
+            f"Cross-document links: {report.get('cross_document_links', 0)}",
+            f"Cross-analysis links: {report.get('cross_analysis_links', 0)}",
+            f"Duplicate documents skipped: {report.get('duplicate_documents_skipped', 0)}",
+            "",
+            f"Embedding model: {report.get('embedding_model')}",
+            f"Embedding dimensions: {report.get('embedding_dimensions')}",
+        ])
+        return "\n".join(lines)
 
     def _store_chunks(self, chunks: List[str], metadatas: List[Dict[str, Any]], ids: List[str]) -> None:
         for start in range(0, len(chunks), self.config.batch_size):
@@ -1035,8 +1345,9 @@ class DocumentAgent:
             doc_hash = self.generate_document_hash(path)
             allow_replace = force_reingest
             if not allow_replace and self.document_exists(doc_hash):
-                logger.info("Skipped duplicate: %s", path.name)
-                return IngestionResult("success", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, True).to_dict()
+                message = "Document already exists. Skipping ingestion."
+                logger.info("%s source=%s doc_hash=%s", message, path.name, doc_hash)
+                return IngestionResult("success", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, True, message=message).to_dict()
             if (self.config.overwrite or overwrite) and self._source_chunk_ids(path.name):
                 old_ids = self._source_chunk_ids(path.name)
                 self.collection.delete(ids=old_ids)
@@ -1047,9 +1358,15 @@ class DocumentAgent:
             chunk_records = self._chunk_pages(pages)
             chunks = [record["text"] for record in chunk_records]
             ids = [str(uuid.uuid4()) for _ in chunk_records]
-            self._store_chunks(chunks, self._build_chunk_metadata(path, doc_hash, chunk_records, current_analysis, pages, ids, text), ids)
+            metadatas = self._build_chunk_metadata(path, doc_hash, chunk_records, current_analysis, pages, ids, text)
+            quality_report = self.build_quality_report(metadatas)
+            validation = quality_report["validation"]
+            if validation["broken_previous_links"] or validation["broken_next_links"] or validation["cross_document_links"] or validation["cross_analysis_links"] or validation["invalid_sequences"]:
+                raise ValueError(f"Metadata validation failed: {validation}")
+            self._store_chunks(chunks, metadatas, ids)
+            print(self.format_quality_report(quality_report))
             logger.info("Loaded document=%s pages=%s chunks=%s time=%.2fs", path.name, len(pages), len(chunks), time.time() - started)
-            return IngestionResult("success", path.name, current_analysis, len(chunks), time.time() - started, self.config.collection_name, False).to_dict()
+            return IngestionResult("success", path.name, current_analysis, len(chunks), time.time() - started, self.config.collection_name, False, quality_report=quality_report).to_dict()
         except Exception as exc:
             logger.exception("Error ingesting %s", path)
             return IngestionResult("error", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, False, str(exc)).to_dict()
@@ -1058,7 +1375,20 @@ class DocumentAgent:
         files = discover_supported_files(directory_path)
         current_analysis = analysis_id or self.create_analysis()
         with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
-            return [future.result() for future in [executor.submit(self.ingest_document, str(path), analysis_id=current_analysis) for path in files]]
+            results = [future.result() for future in [executor.submit(self.ingest_document, str(path), analysis_id=current_analysis) for path in files]]
+        aggregate_report = self.get_quality_report_for_analysis(current_analysis, duplicate_documents_skipped=sum(1 for result in results if result.get("duplicates_skipped")))
+        if aggregate_report["total_chunks"]:
+            print(self.format_quality_report(aggregate_report))
+        return results
+
+    def get_quality_report_for_analysis(self, analysis_id: str, duplicate_documents_skipped: int = 0) -> Dict[str, Any]:
+        try:
+            data = self.collection.get(where={"analysis_id": analysis_id}, include=["metadatas"])
+        except Exception as exc:
+            logger.error("Error building quality report for analysis %s: %s", analysis_id, exc)
+            return self.build_quality_report([], duplicate_documents_skipped=duplicate_documents_skipped)
+        metadatas = [metadata for metadata in data.get("metadatas", []) or [] if isinstance(metadata, dict)]
+        return self.build_quality_report(metadatas, duplicate_documents_skipped=duplicate_documents_skipped)
 
     def query_analysis(self, analysis_id: str, question: str, n_results: int = 5) -> Dict[str, Any]:
         """Execute semantic search within a specific analysis session.
@@ -1140,8 +1470,10 @@ if __name__ == "__main__":
     # REQUIREMENT 1: Ingest directory with the SAME analysis_id
     print(f"2. Ingesting documents from demo_data with shared analysis_id...")
     ingest_results = agent.ingest_directory(str(scripts_dir / "demo_data"), analysis_id=analysis_id)
-    success_count = sum(1 for r in ingest_results if r.get("status") == "success")
-    print(f"   Successfully ingested {success_count} documents\n")
+    indexed_count = sum(1 for r in ingest_results if r.get("status") == "success" and r.get("chunks", 0) > 0)
+    skipped_count = sum(1 for r in ingest_results if r.get("duplicates_skipped"))
+    print(f"   Indexed {indexed_count} documents")
+    print(f"   Duplicate documents skipped: {skipped_count}\n")
     
     # REQUIREMENT 2: Get documents for this analysis
     print(f"3. Retrieving all documents in this analysis session")
