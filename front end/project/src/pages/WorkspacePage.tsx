@@ -5,6 +5,15 @@ import { Icon } from '@/components/Icon';
 import { AGENTS, PIPELINE_STEPS, UPLOADED_DOCS } from '@/lib/mockData';
 import type { AgentStatus, UploadedDoc } from '@/lib/types';
 
+interface AnalysisResponse {
+  analysis_id: string;
+  document_id: string;
+  company_name: string;
+  report_year: string;
+  answer: string;
+  sources: Array<{ chunk_id?: string; source_file?: string; section?: string; page?: number; score?: number; snippet?: string }>;
+}
+
 const statusConfig: Record<AgentStatus, { label: string; color: string; dot: string; badge: 'success' | 'warning' | 'neutral' }> = {
   completed: { label: 'Completed', color: 'text-emerald-600 dark:text-emerald-400', dot: 'bg-emerald-500', badge: 'success' },
   running: { label: 'Running', color: 'text-brand-600 dark:text-brand-400', dot: 'bg-brand-500', badge: 'warning' },
@@ -15,6 +24,14 @@ export function WorkspacePage() {
   const { setActiveSessionId, setPage } = useApp();
   const [dragging, setDragging] = useState(false);
   const [docs, setDocs] = useState<UploadedDoc[]>(UPLOADED_DOCS);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [companyName, setCompanyName] = useState('ABB');
+  const [reportYear, setReportYear] = useState('2025');
+  const [question, setQuestion] = useState('What are the major financial developments and risks in this report?');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [sources, setSources] = useState<AnalysisResponse['sources']>([]);
   const sessionId = 'WS-2026-0847';
 
   const handleDrop = (e: React.DragEvent) => {
@@ -37,6 +54,8 @@ export function WorkspacePage() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length) {
+      const file = files[0];
+      setSelectedFile(file);
       const newDocs = files.map((f, i) => ({
         id: `d${Date.now()}-${i}`,
         name: f.name,
@@ -46,6 +65,43 @@ export function WorkspacePage() {
         status: 'ready' as const,
       }));
       setDocs((d) => [...d, ...newDocs]);
+    }
+  };
+
+  const submitAnalysis = async () => {
+    if (!selectedFile) {
+      setError('Please choose a PDF or text report first.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('company_name', companyName);
+    formData.append('report_year', reportYear);
+    formData.append('question', question);
+
+    try {
+      const response = await fetch('http://localhost:8000/analysis/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || 'Analysis failed');
+      }
+
+      setAnswer(data.answer || '');
+      setSources(data.sources || []);
+      setActiveSessionId(data.analysis_id || sessionId);
+      setPage('chat');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Request failed');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -177,8 +233,56 @@ export function WorkspacePage() {
         </div>
       </div>
 
+      <Card className="p-6 mt-6">
+        <SectionHeader title="ABB research workflow" subtitle="Document → Extraction → ChromaDB → Research" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <label className="text-sm text-secondary">
+            Company name
+            <input value={companyName} onChange={(e) => setCompanyName(e.target.value)} className="mt-1 w-full rounded-xl border border-base bg-surface px-3 py-2 text-primary outline-none" />
+          </label>
+          <label className="text-sm text-secondary">
+            Report year
+            <input value={reportYear} onChange={(e) => setReportYear(e.target.value)} className="mt-1 w-full rounded-xl border border-base bg-surface px-3 py-2 text-primary outline-none" />
+          </label>
+        </div>
+        <label className="block text-sm text-secondary mt-4">
+          Research question
+          <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={4} className="mt-1 w-full rounded-xl border border-base bg-surface px-3 py-2 text-primary outline-none" />
+        </label>
+
+        <div className="flex items-center justify-between mt-4 gap-3">
+          <button onClick={submitAnalysis} disabled={loading || !selectedFile} className="inline-flex items-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">
+            <Icon name="Sparkles" size={16} />
+            {loading ? 'Analyzing…' : 'Analyze report'}
+          </button>
+          <span className="text-xs text-tertiary">{selectedFile ? selectedFile.name : 'No file selected'}</span>
+        </div>
+
+        {error && <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+
+        {answer && (
+          <div className="mt-6 rounded-2xl border border-base bg-surface p-4">
+            <p className="text-sm font-semibold text-primary">Research answer</p>
+            <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-secondary">{answer}</div>
+            {sources.length > 0 && (
+              <div className="mt-4 space-y-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-tertiary">Sources</p>
+                {sources.map((source, index) => (
+                  <div key={`${source.chunk_id || index}-${index}`} className="rounded-lg border border-base bg-subtle p-2 text-xs text-secondary">
+                    <span className="font-medium text-primary">{source.section || 'Source'}</span>
+                    {source.chunk_id && <span className="ml-2">chunk {source.chunk_id}</span>}
+                    {source.source_file && <span className="ml-2">{source.source_file}</span>}
+                    {typeof source.score === 'number' && <span className="ml-2">score {source.score.toFixed(3)}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       {/* AI Agent Status Panel */}
-      <Card className="p-6">
+      <Card className="p-6 mt-6">
         <SectionHeader
           title="AI Agent Status Panel"
           subtitle="Six specialized agents working in parallel"

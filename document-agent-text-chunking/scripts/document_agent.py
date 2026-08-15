@@ -865,6 +865,8 @@ class DocumentAgent:
         lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if re.sub(r"\s+", " ", line).strip()]
         evidence = " ".join(lines[:80])
         lowered = evidence.lower()
+        if re.search(r"\bproxy statement\b|\bannual meeting of shareholders\b", lowered):
+            return "Proxy Statement"
         if re.search(r"\b10-k\b", lowered):
             return "10-K"
         if re.search(r"\b10-q\b", lowered):
@@ -1051,9 +1053,26 @@ class DocumentAgent:
         names += re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:is|was|serves as)\s+(?:the\s+)?(?:CEO|CFO|Chair|Director)", text, re.I)
         return self._csv(names)
 
-    def _build_chunk_metadata(self, path: Path, doc_hash: str, chunks: List[Dict[str, Any]], analysis_id: str, pages: List[Dict[str, Any]], ids: List[str], full_text: str) -> List[Dict[str, Any]]:
+    def _build_chunk_metadata(
+        self,
+        path: Path,
+        doc_hash: str,
+        chunks: List[Dict[str, Any]],
+        analysis_id: str,
+        pages: List[Dict[str, Any]],
+        ids: List[str],
+        full_text: str,
+        document_id: Optional[str] = None,
+        company_name: Optional[str] = None,
+        report_year: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         doc = self._document_metadata(path, full_text, pages)
-        document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
+        document_id = document_id or str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
+        if company_name:
+            doc["company_name"] = company_name
+        if report_year:
+            doc["report_year"] = str(report_year)
+            doc["financial_year"] = str(report_year)
         result = []
         timestamp = datetime.now(timezone.utc).isoformat()
         for index, chunk_record in enumerate(chunks):
@@ -1093,6 +1112,7 @@ class DocumentAgent:
                 "analysis_id": analysis_id,
                 "document_id": document_id,
                 "source": path.name,
+                "source_file": path.name,
                 "doc_hash": doc_hash,
                 "doc_type": doc["report_type"],
                 "chunk_id": ids[index],
@@ -1114,8 +1134,8 @@ class DocumentAgent:
                 "report_title": doc["report_title"],
                 "document_language": doc["document_language"],
                 "report_type": doc["report_type"],
-                "report_year": doc["report_year"],
-                "financial_year": doc["financial_year"],
+                "report_year": str(report_year or doc["report_year"]),
+                "financial_year": str(report_year or doc["financial_year"]),
                 "report_period": doc["report_period"],
                 "filing_date": doc["filing_date"],
                 "fiscal_year_start": doc["fiscal_year_start"],
@@ -1128,7 +1148,7 @@ class DocumentAgent:
                 "chunk_type": chunk_type,
                 "chunk_summary": chunk_summary[:240],
                 "industry": doc["industry"],
-                "company_name": doc["company_name"],
+                "company_name": company_name or doc["company_name"],
                 "company_ticker": (re.search(r"\b(?:ticker|symbol)\s*[:\-]\s*([A-Z]{1,5})\b", chunk) or ["", ""])[1],
                 "confidence_score": confidence,
                 "semantic_tags": semantic_tags,
@@ -1220,7 +1240,11 @@ class DocumentAgent:
                         else:
                             broken_next += 1
                         continue
-                    if linked.get("document_id") != document_id:
+                    if (
+                        linked.get("document_id") != document_id
+                        or linked.get("source") != metadata.get("source")
+                        or linked.get("doc_hash") != metadata.get("doc_hash")
+                    ):
                         cross_document_links += 1
                     if linked.get("analysis_id") != analysis_id:
                         cross_analysis_links += 1
@@ -1335,7 +1359,16 @@ class DocumentAgent:
             logger.info("Embedding generation and insertion: chunks %s-%s", start + 1, min(end, len(chunks)))
             self.collection.add(documents=chunks[start:end], metadatas=metadatas[start:end], ids=ids[start:end])
 
-    def ingest_document(self, file_path_str: str, overwrite: Optional[bool] = None, analysis_id: Optional[str] = None, force_reingest: bool = False) -> Dict[str, Any]:
+    def ingest_document(
+        self,
+        file_path_str: str,
+        overwrite: Optional[bool] = None,
+        analysis_id: Optional[str] = None,
+        force_reingest: bool = False,
+        company_name: Optional[str] = None,
+        report_year: Optional[str] = None,
+        document_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         started = time.time()
         path = self._resolve_file_path(file_path_str)
         current_analysis = analysis_id or self.create_analysis()
@@ -1343,12 +1376,12 @@ class DocumentAgent:
             return IngestionResult("error", path.name, current_analysis, 0, 0, self.config.collection_name, False, "File not found").to_dict()
         try:
             doc_hash = self.generate_document_hash(path)
-            allow_replace = force_reingest
+            allow_replace = force_reingest or bool(company_name or report_year or document_id)
             if not allow_replace and self.document_exists(doc_hash):
                 message = "Document already exists. Skipping ingestion."
                 logger.info("%s source=%s doc_hash=%s", message, path.name, doc_hash)
                 return IngestionResult("success", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, True, message=message).to_dict()
-            if (self.config.overwrite or overwrite) and self._source_chunk_ids(path.name):
+            if (self.config.overwrite or overwrite or allow_replace) and self._source_chunk_ids(path.name):
                 old_ids = self._source_chunk_ids(path.name)
                 self.collection.delete(ids=old_ids)
                 logger.info("Replaced existing source source=%s chunks=%s", path.name, len(old_ids))
@@ -1358,7 +1391,18 @@ class DocumentAgent:
             chunk_records = self._chunk_pages(pages)
             chunks = [record["text"] for record in chunk_records]
             ids = [str(uuid.uuid4()) for _ in chunk_records]
-            metadatas = self._build_chunk_metadata(path, doc_hash, chunk_records, current_analysis, pages, ids, text)
+            metadatas = self._build_chunk_metadata(
+                path,
+                doc_hash,
+                chunk_records,
+                current_analysis,
+                pages,
+                ids,
+                text,
+                document_id=document_id,
+                company_name=company_name,
+                report_year=report_year,
+            )
             quality_report = self.build_quality_report(metadatas)
             validation = quality_report["validation"]
             if validation["broken_previous_links"] or validation["broken_next_links"] or validation["cross_document_links"] or validation["cross_analysis_links"] or validation["invalid_sequences"]:
