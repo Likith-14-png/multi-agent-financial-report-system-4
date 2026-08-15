@@ -8,7 +8,7 @@ client = TestClient(app)
 
 
 def test_real_upload_produces_research_evidence_for_company():
-    report_path = Path(__file__).resolve().parent.parent / "tmp_uploads" / "mock_financial_report_2024_2025.pdf"
+    report_path = Path(__file__).resolve().parent / "fixtures" / "mock_financial_report_2024_2025.pdf"
     response = client.post(
         "/analysis/upload",
         files={"file": (report_path.name, report_path.read_bytes(), "application/pdf")},
