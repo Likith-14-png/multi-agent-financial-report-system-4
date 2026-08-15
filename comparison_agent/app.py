@@ -68,3 +68,4 @@ with tab2:
         result = agent.compare_companies(parsed)
         st.success("Comparison Generated for Report Agent!")
         st.json(result)
+        # Comparison Agent module
