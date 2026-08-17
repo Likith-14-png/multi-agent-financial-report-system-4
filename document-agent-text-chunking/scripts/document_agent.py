@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from metadata_validator import MetadataValidator
 from shared_chroma_path import resolve_chroma_db_path
 
 try:
@@ -865,6 +864,8 @@ class DocumentAgent:
         lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if re.sub(r"\s+", " ", line).strip()]
         evidence = " ".join(lines[:80])
         lowered = evidence.lower()
+        if re.search(r"\bproxy statement\b|\bannual meeting of shareholders\b", lowered):
+            return "Proxy Statement"
         if re.search(r"\b10-k\b", lowered):
             return "10-K"
         if re.search(r"\b10-q\b", lowered):
@@ -887,39 +888,87 @@ class DocumentAgent:
             return "Earnings Report"
         return "Other"
 
+    @staticmethod
+    def _clean_section_heading(value: str) -> str:
+        cleaned = re.sub(r"\s+", " ", value or "").strip()
+        cleaned = re.sub(r"^[Pp]AGE\s+\d+\s*[-—:|]*\s*", "", cleaned)
+        cleaned = cleaned.replace("—", "-").replace("–", "-")
+        cleaned = re.sub(r"^[-:|\s]+|[-:|\s]+$", "", cleaned)
+        cleaned = re.sub(r"\s*[/|]\s*", " / ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
     def _extract_section_heading_and_type(self, text: str) -> Tuple[str, str]:
+        """Extract section heading and type from document text. Only returns actual headings found in source."""
         if not text:
             return "", "other"
         cleaned = re.sub(r"\s+", " ", text).strip()
         lower = cleaned.lower()
+        
+        # Pattern 1: PAGE markers with section names (e.g., "PAGE 1 — COVER / COMPANY OVERVIEW")
+        page_marker = re.search(r"PAGE\s+\d+\s*(?:[—–-])\s*(.+?)(?:\s*$|\n)", cleaned, re.I)
+        if page_marker:
+            section_name = page_marker.group(1).strip()
+            section_name = re.sub(r"\s*[/|]\s*", " / ", section_name)
+            if section_name:
+                # Infer type from the section name
+                section_type = "other"
+                if re.search(r"cover|overview", section_name, re.I):
+                    section_type = "business"
+                elif re.search(r"balance sheet", section_name, re.I):
+                    section_type = "financial_statement"
+                elif re.search(r"income|earnings", section_name, re.I):
+                    section_type = "financial_statement"
+                elif re.search(r"cash flow", section_name, re.I):
+                    section_type = "financial_statement"
+                elif re.search(r"metric|highlight", section_name, re.I):
+                    section_type = "financial_statement"
+                return self._clean_section_heading(section_name), section_type
+        
+        # Pattern 2: Known section patterns with standardized titles
         section_patterns = [
             (r"management discussion and analysis|md&a", "Management Discussion and Analysis", "management_discussion"),
             (r"business overview|our business|business\s*$|operations overview|company overview", "Business Overview", "business"),
-            (r"risk factors?|market risk|legal proceedings|cybersecurity risk", "Risk Factors", "risk"),
+            (r"key financial (?:metrics|highlights|ratios)", "Financial Highlights", "financial_statement"),
+            (r"risk factors?|market risk|legal proceedings|cybersecurity risk|risks and uncertainties", "Risk Factors", "risk"),
             (r"consolidated balance sheets?|balance sheets?", "Balance Sheets", "financial_statement"),
             (r"consolidated statements? of (?:income|operations)|income statements?|statements? of earnings", "Income Statement", "financial_statement"),
             (r"statements? of cash flows?|cash flow statements?", "Cash Flow Statement", "financial_statement"),
-            (r"statements? of shareholders'? equity|stockholders'? equity", "Shareholders' Equity", "financial_statement"),
+            (r"statements? of shareholders'? equity|stockholders'? equity|equity statements?", "Shareholders' Equity", "financial_statement"),
+            (r"comprehensive financial metrics", "Financial Metrics", "financial_statement"),
             (r"financial statements?", "Financial Statements", "financial_statement"),
-            (r"notes to the financial statements?|footnotes?", "Notes to Financial Statements", "notes"),
+            (r"notes to (?:the\s+)?financial statements?|footnotes?", "Notes to Financial Statements", "notes"),
             (r"dividends?", "Dividends", "financial_statement"),
             (r"share repurchases?|stock repurchases?", "Share Repurchases", "financial_statement"),
-            (r"liquidity|capital resources", "Liquidity and Capital Resources", "management_discussion"),
+            (r"liquidity|capital resources|cash flow and liquidity", "Liquidity and Capital Resources", "management_discussion"),
             (r"letter to shareholders?|shareholders' letter", "Letter to Shareholders", "cover"),
-            (r"corporate governance", "Corporate Governance", "governance"),
+            (r"corporate governance|governance structure", "Corporate Governance", "governance"),
             (r"environmental,? social,? and governance|esg|sustainability", "Sustainability", "sustainability"),
-            (r"auditor(?:'s)? report|independent auditor", "Auditor's Report", "financial_statement"),
-            (r"appendix|appendices", "Appendix", "appendix"),
+            (r"auditor(?:'s)? report|independent auditor|audit opinion", "Auditor's Report", "financial_statement"),
+            (r"appendix|appendices|supplementary information", "Appendix", "appendix"),
+            (r"executive summary|summary of results", "Executive Summary", "summary"),
         ]
         for pattern, title, kind in section_patterns:
             if re.search(pattern, lower, re.I):
-                return self._normalize_heading(title), kind
+                return self._clean_section_heading(title), kind
+        
+        # Pattern 3: Fallback to detecting heading-like text from first few lines
         heading_candidates = [line.strip() for line in text.splitlines() if line.strip()]
         for line in heading_candidates[:8]:
-            if len(line.split()) <= 12 and not re.search(r"[.!?]$", line):
-                heading = self._normalize_heading(line)
-                if len(heading.split()) >= 2 and re.search(r"[A-Za-z]", heading):
-                    return heading, "other"
+            candidate = self._clean_section_heading(line)
+            # Heuristic: headings are typically 2-12 words, capitalized, no ending punctuation,
+            # and don't look like data or sentences
+            if not candidate or len(candidate.split()) > 12 or len(candidate.split()) < 2:
+                continue
+            if re.search(r"[.!?]$", candidate):
+                continue
+            # Avoid common non-heading patterns
+            if re.search(r"^(\d+|[a-z]+\s+[a-z]+\s+[a-z]+|.*\b(?:million|billion|percent|%|[$€£₹])\b)", candidate, re.I):
+                continue
+            if re.search(r"[A-Z]", candidate):
+                return candidate, "other"
+        
+        # Pattern 4: No reliable heading found
         return "", "other"
 
     def _window_chunk_text(self, index: int, chunks: List[Dict[str, Any]]) -> str:
@@ -958,13 +1007,68 @@ class DocumentAgent:
         }
 
     def _extract_financial_metrics(self, text: str) -> str:
+        """Extract only structured financial metrics with values. Ignore narrative phrases."""
+        if not text:
+            return ""
+        normalized = self.clean_text(text)
+        # Only extract metrics that have an explicit value adjacent to them
+        metric_patterns = [
+            (r"\bRevenue\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Revenue"),
+            (r"\bOperating Income\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Operating Income"),
+            (r"\bNet Income\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Net Income"),
+            (r"\bTotal Assets\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Assets"),
+            (r"\b(?:Total )?Debt\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Debt"),
+            (r"\bOperating Cash Flow\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Operating Cash Flow"),
+            (r"\bFree Cash Flow\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Free Cash Flow"),
+            (r"\b(?:EPS|Earnings Per Share|Diluted EPS)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?%?)", "EPS"),
+            (r"\b(?:Total )?Equity\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Equity"),
+            (r"\bOperating Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Operating Margin"),
+            (r"\bCapital Expenditure\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*([-$]?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Capital Expenditure"),
+            (r"\b(?:R&D(?: Expense)?|Research and Development)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "R&D"),
+            (r"\bGross Profit\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Gross Profit"),
+            (r"\bGross Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Gross Margin"),
+            (r"\bNet Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Net Margin"),
+            (r"\bTotal Liabilities\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Liabilities"),
+            (r"\b(?:Cash and Cash Equivalents|Cash)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Cash"),
+        ]
         metrics: List[str] = []
-        mapping = self._financial_metric_mapping()
-        normalized = text.lower()
-        for pattern, name in mapping.items():
-            if re.search(pattern, normalized, re.I) and name not in metrics:
-                metrics.append(name)
-        return self._csv(metrics)
+        for pattern, name in metric_patterns:
+            for match in re.finditer(pattern, normalized, re.I):
+                value = match.group(1).strip() if match.lastindex else ""
+                if not value or value in {"-", ""}:
+                    continue
+                # Clean up the value
+                value = value.strip("() ") if value.strip("() ") else value
+                metrics.append(f"{name}: {value}")
+        
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for metric in metrics:
+            if metric not in seen:
+                ordered.append(metric)
+                seen.add(metric)
+        
+        # Also extract from table rows (metrics followed by numeric values separated by pipes or tabs)
+        for line in normalized.splitlines():
+            # Skip lines that don't look like table rows (should have separators)
+            if not re.search(r"[|\t]", line):
+                continue
+            # Look for metric names followed by a value in the line
+            metric_match = re.search(
+                r"\b(Revenue|Operating Income|Net Income|Total Assets|Total Debt|Debt|Operating Cash Flow|Free Cash Flow|EPS|Total Equity|Operating Margin|Capital Expenditure|R&D|Gross Profit|Gross Margin|Net Margin|Total Liabilities|Cash|Equity)\b[^|\t\n]*[|\t]+\s*(\$?-?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)",
+                line, re.I
+            )
+            if metric_match:
+                name = metric_match.group(1)
+                value = metric_match.group(2).strip()
+                if value and value not in {"-", ""}:
+                    metric = f"{name}: {value}"
+                    if metric not in seen:
+                        ordered.append(metric)
+                        seen.add(metric)
+        
+        return ", ".join(ordered)
 
     @staticmethod
     def _semantic_tag_mapping() -> dict[str, Tuple[str, ...]]:
@@ -1051,6 +1155,38 @@ class DocumentAgent:
         names += re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:is|was|serves as)\s+(?:the\s+)?(?:CEO|CFO|Chair|Director)", text, re.I)
         return self._csv(names)
 
+    @staticmethod
+    def _extract_countries(text: str) -> str:
+        """Return only countries that are explicitly and directly mentioned in the source text.
+        
+        This is source-grounded extraction: we only populate countries when the document
+        explicitly states them, typically after phrases like 'countries:' or 'country:'.
+        We do NOT infer the company headquarters country or assume based on company name.
+        """
+        if not text:
+            return ""
+        normalized = DocumentAgent.clean_text(text)
+        
+        # Pattern: Explicit "countries:" or "country:" label
+        explicit_match = re.search(r"\b(?:countries?|country)\s*[:\-]\s*([^\n.;]{2,200})", normalized, re.I)
+        if not explicit_match:
+            return ""
+        
+        candidate = explicit_match.group(1)
+        country_names = [
+            "United States", "United Kingdom", "Canada", "India", "Germany", "France", "Japan", "China",
+            "Australia", "Singapore", "Switzerland", "Brazil", "Mexico", "Italy", "Spain", "Netherlands",
+            "Sweden", "Finland", "Norway", "Denmark", "Belgium", "Austria", "South Korea", "United Arab Emirates",
+            "South Africa", "Russia", "New Zealand", "Thailand", "Indonesia", "Malaysia", "Philippines",
+            "Vietnam", "Czech Republic", "Poland", "Hungary", "Taiwan", "Hong Kong", "Greece", "Portugal",
+            "Ireland", "Chile", "Argentina", "Colombia", "Peru"
+        ]
+        found = []
+        for country in country_names:
+            if re.search(rf"\b{re.escape(country)}\b", candidate, re.I):
+                found.append(country)
+        return ", ".join(dict.fromkeys(found))
+
     def _build_chunk_metadata(self, path: Path, doc_hash: str, chunks: List[Dict[str, Any]], analysis_id: str, pages: List[Dict[str, Any]], ids: List[str], full_text: str) -> List[Dict[str, Any]]:
         doc = self._document_metadata(path, full_text, pages)
         document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
@@ -1122,8 +1258,9 @@ class DocumentAgent:
                 "fiscal_year_end": doc["fiscal_year_end"],
                 "currency": doc["currency"],
                 "document_version": "1",
+                "company_index": 0,
                 "section_title": section_title,
-                "subsection_title": "",
+                "subsection_title": (chunk_record.get("subsection_title") or "") if isinstance(chunk_record, dict) else "",
                 "section_type": section_type,
                 "chunk_type": chunk_type,
                 "chunk_summary": chunk_summary[:240],
@@ -1135,7 +1272,7 @@ class DocumentAgent:
                 "organizations": organizations,
                 "people": self._people(surrounding_text),
                 "products": products,
-                "countries": self._csv(re.findall(r"\b(?:United States|United Kingdom|Canada|India|Germany|France|Japan|China|Australia|Singapore)\b", surrounding_text)),
+                "countries": self._extract_countries(surrounding_text),
                 "financial_metrics": financial_metrics,
                 "financial_entities": financial_metrics,
                 "financial_values": self._csv(values),
@@ -1220,7 +1357,7 @@ class DocumentAgent:
                         else:
                             broken_next += 1
                         continue
-                    if linked.get("document_id") != document_id:
+                    if linked.get("document_id") != document_id or linked.get("source") != metadata.get("source"):
                         cross_document_links += 1
                     if linked.get("analysis_id") != analysis_id:
                         cross_analysis_links += 1

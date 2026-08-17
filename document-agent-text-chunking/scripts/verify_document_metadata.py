@@ -10,7 +10,8 @@ import chromadb
 from document_agent import DocumentAgent, DocumentAgentConfig
 from shared_chroma_path import resolve_chroma_db_path
 
-COLLECTION_NAME = "financial_research_2024"
+COLLECTION_NAME = "financial_research_v1"
+LEGACY_COLLECTION_NAMES = ("financial_research_2024", "financial_research_v1")
 ENTERPRISE_FIELDS: Set[str] = {
     "company_name",
     "document_id",
@@ -37,6 +38,16 @@ ENTERPRISE_FIELDS: Set[str] = {
 }
 
 
+def resolve_collection_name(db_path: Path) -> str:
+    """Prefer the active collection name while tolerating legacy names."""
+    client = chromadb.PersistentClient(path=str(db_path))
+    existing_names = {collection.name for collection in client.list_collections()}
+    for candidate in LEGACY_COLLECTION_NAMES:
+        if candidate in existing_names:
+            return candidate
+    return COLLECTION_NAME
+
+
 def collection_path() -> Path:
     """Resolve the same database directory used by the viewer and agent."""
     scripts_dir = Path(__file__).resolve().parent
@@ -48,26 +59,27 @@ def collection_path() -> Path:
 
 def inspect_collection(db_path: Path) -> Dict[str, Any]:
     """Return one stored chunk and the enterprise fields missing from it."""
+    collection_name = resolve_collection_name(db_path)
     client = chromadb.PersistentClient(path=str(db_path))
     collection_names = [collection.name for collection in client.list_collections()]
-    if COLLECTION_NAME not in collection_names:
+    if collection_name not in collection_names:
         return {
             "db_path": str(db_path),
-            "collection": COLLECTION_NAME,
+            "collection": collection_name,
             "collection_exists": False,
             "count": 0,
             "metadata": {},
             "missing_fields": sorted(ENTERPRISE_FIELDS),
         }
 
-    collection = client.get_collection(COLLECTION_NAME)
+    collection = client.get_collection(collection_name)
     data = collection.get(limit=1, include=["metadatas"])
     metadata = (data.get("metadatas") or [{}])[0]
     if not isinstance(metadata, dict):
         metadata = {}
     return {
         "db_path": str(db_path),
-        "collection": COLLECTION_NAME,
+        "collection": collection_name,
         "collection_exists": True,
         "count": collection.count(),
         "metadata": metadata,
@@ -89,15 +101,16 @@ def print_report(report: Dict[str, Any]) -> None:
 
 def migrate(db_path: Path, document_path: Path) -> Dict[str, Any]:
     """Recreate the configured collection and ingest the supplied PDF."""
+    collection_name = resolve_collection_name(db_path)
     client = chromadb.PersistentClient(path=str(db_path))
     existing_names = [collection.name for collection in client.list_collections()]
-    if COLLECTION_NAME in existing_names:
-        client.delete_collection(COLLECTION_NAME)
-        print(f"MIGRATE | deleted_collection={COLLECTION_NAME}")
+    if collection_name in existing_names:
+        client.delete_collection(collection_name)
+        print(f"MIGRATE | deleted_collection={collection_name}")
 
     config = DocumentAgentConfig(
         db_path=str(db_path),
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         overwrite=False,
         enable_document_versioning=True,
     )
@@ -107,6 +120,15 @@ def migrate(db_path: Path, document_path: Path) -> Dict[str, Any]:
     if result["status"] != "success" or result["chunks"] == 0:
         raise RuntimeError(f"Migration ingestion failed: {result}")
     return inspect_collection(db_path)
+
+
+def default_document_path() -> Path:
+    """Return the first available PDF in the demo_data directory."""
+    demo_dir = Path(__file__).resolve().parent / "demo_data"
+    pdfs = sorted(demo_dir.glob("*.pdf"))
+    if pdfs:
+        return pdfs[0]
+    return demo_dir / "2024_Annual_Report.pdf"
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--document",
         type=Path,
-        default=Path(__file__).resolve().parent / "demo_data" / "2024_Annual_Report.pdf",
+        default=default_document_path(),
         help="PDF to ingest when --migrate is supplied.",
     )
     return parser.parse_args()

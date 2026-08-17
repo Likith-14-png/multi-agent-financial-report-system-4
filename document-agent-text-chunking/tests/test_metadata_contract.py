@@ -70,6 +70,7 @@ def test_chunk_metadata_uses_canonical_schema_and_legacy_aliases():
     assert first["report_year"] == "2024"
     assert first["financial_year"] == "2024"
     assert first["report_period"] == "March 31, 2024"
+    assert first["company_index"] == 0
     assert first["page_number"] == "1"
     assert first["previous_chunk_id"] == ""
     assert first["next_chunk_id"] == "chunk-2"

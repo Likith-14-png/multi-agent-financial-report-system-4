@@ -1,4 +1,0 @@
-chromadb
-PyPDF2
-pymupdf
-sentence-transformers

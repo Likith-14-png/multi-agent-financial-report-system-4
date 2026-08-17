@@ -6,6 +6,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from document_agent import resolve_chroma_db_path
 from document_agent_refactored import DocumentAgent, DocumentAgentConfig, discover_supported_files
+from verify_document_metadata import COLLECTION_NAME
+
+
+def test_verify_metadata_uses_active_collection_name():
+    assert COLLECTION_NAME == "financial_research_v1"
 
 
 def test_ingest_sample_text_file(tmp_path):
