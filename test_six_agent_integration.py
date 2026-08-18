@@ -4,6 +4,7 @@ from backend.orchestration.workflow import AnalysisWorkflow
 
 
 def test_document_extraction_chromadb_research_red_flag_comparison_report_integration(tmp_path, monkeypatch):
+    
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     report_path = Path(__file__).resolve().parent / "data" / "abb_2025_report.txt"
 

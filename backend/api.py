@@ -1,10 +1,14 @@
-from __future__ import annotations
-
 import os
 import re
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -336,3 +340,10 @@ async def upload_analysis(
         "error": None,
     }
     return ApiResponse.model_validate(payload)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("backend.api:app", host="127.0.0.1", port=8000, reload=True)
+

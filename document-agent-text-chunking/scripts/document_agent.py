@@ -631,6 +631,17 @@ class DocumentAgent:
         return DocumentAgent._csv(products)
 
     @staticmethod
+    def _extract_countries(text: str) -> str:
+        common_countries = [
+            "United States", "USA", "United Kingdom", "UK", "Germany", "Switzerland",
+            "Sweden", "China", "India", "Japan", "France", "Canada", "Australia", "Singapore",
+            "Brazil", "Mexico", "Italy", "Spain", "Netherlands", "South Korea", "Norway", "Finland",
+        ]
+        pattern = r"\b(" + "|".join(re.escape(c) for c in common_countries) + r")\b"
+        found = list(dict.fromkeys(m.group(0) for m in re.finditer(pattern, text, re.I)))
+        return DocumentAgent._csv(found)
+
+    @staticmethod
     def _normalize_heading(text: str) -> str:
         return re.sub(r"\s+", " ", re.sub(r"\s*[:\-–—]\s*$", "", text.strip())).strip()
 
@@ -1155,7 +1166,19 @@ class DocumentAgent:
         names += re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\s+(?:is|was|serves as)\s+(?:the\s+)?(?:CEO|CFO|Chair|Director)", text, re.I)
         return self._csv(names)
 
-    def _build_chunk_metadata(self, path: Path, doc_hash: str, chunks: List[Dict[str, Any]], analysis_id: str, pages: List[Dict[str, Any]], ids: List[str], full_text: str) -> List[Dict[str, Any]]:
+    def _build_chunk_metadata(
+        self,
+        path: Path,
+        doc_hash: str,
+        chunks: List[Dict[str, Any]],
+        analysis_id: str,
+        pages: List[Dict[str, Any]],
+        ids: List[str],
+        full_text: str,
+        document_id: Optional[str] = None,
+        company_name: Optional[str] = None,
+        report_year: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         doc = self._document_metadata(path, full_text, pages)
         document_id = document_id or str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
         if company_name:

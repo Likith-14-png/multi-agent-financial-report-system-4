@@ -2,9 +2,16 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+APP_DIR = Path(__file__).resolve().parent
+BASE_DIR = APP_DIR.parent
+ROOT_DIR = BASE_DIR.parent
+
+for env_file in [APP_DIR / ".env", BASE_DIR / ".env", ROOT_DIR / ".env"]:
+    if env_file.is_file():
+        load_dotenv(dotenv_path=env_file)
+
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 CHROMA_DIR = os.getenv("CHROMA_DB_PATH", os.getenv("CHROMA_DIR", str(BASE_DIR / "chroma_db")))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("GEMINI_MODEL", "gemini-2.5-pro"))
