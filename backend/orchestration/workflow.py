@@ -11,14 +11,9 @@ DOC_AGENT_PATH = ROOT / "document-agent-text-chunking" / "scripts"
 EXTRACTION_AGENT_PATH = ROOT / "extraction-agent"
 RED_FLAG_PATH = ROOT / "red_flag_agent"
 REPORT_AGENT_PATH = ROOT / "report-agent"
-if str(DOC_AGENT_PATH) not in sys.path:
-    sys.path.insert(0, str(DOC_AGENT_PATH))
-if str(EXTRACTION_AGENT_PATH) not in sys.path:
-    sys.path.insert(0, str(EXTRACTION_AGENT_PATH))
-if str(RED_FLAG_PATH) not in sys.path:
-    sys.path.insert(0, str(RED_FLAG_PATH))
-if str(REPORT_AGENT_PATH) not in sys.path:
-    sys.path.insert(0, str(REPORT_AGENT_PATH))
+for path in (DOC_AGENT_PATH, EXTRACTION_AGENT_PATH, RED_FLAG_PATH, REPORT_AGENT_PATH):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 from document_agent import DocumentAgent, DocumentAgentConfig
 from research_agent import ResearchAgent
@@ -47,7 +42,6 @@ class AnalysisWorkflow:
     def _get_current_document_records(collection: Any, company_name: str, document_id: str) -> List[tuple[str, Dict[str, Any]]]:
         if collection is None:
             return []
-
         candidates: List[tuple[str, Dict[str, Any]]] = []
         for where in (
             {"$and": [{"company_name": company_name}, {"document_id": document_id}]},
@@ -57,87 +51,44 @@ class AnalysisWorkflow:
                 results = collection.get(where=where, include=["documents", "metadatas"])
             except Exception:
                 continue
-            documents = results.get("documents") or []
-            metadatas = results.get("metadatas") or []
-            for doc, meta in zip(documents, metadatas):
-                if not isinstance(doc, str):
-                    continue
-                if not isinstance(meta, dict):
-                    continue
-                if document_id and str(meta.get("document_id") or "") and str(meta.get("document_id")) != str(document_id):
-                    continue
-                candidates.append((doc, meta))
+            for doc, meta in zip(results.get("documents") or [], results.get("metadatas") or []):
+                if isinstance(doc, str) and isinstance(meta, dict):
+                    if document_id and str(meta.get("document_id") or "") and str(meta.get("document_id")) != str(document_id):
+                        continue
+                    candidates.append((doc, meta))
             if candidates:
                 break
-
-        if not candidates:
-            return []
-
-        candidates.sort(key=lambda item: int((item[1].get("chunk_index") if isinstance(item[1], dict) else 0) or 0))
+        candidates.sort(key=lambda item: int((item[1].get("chunk_index") or 0)))
         return candidates
 
-    def run_analysis(self, report_path: str, company_name: str, report_year: str, question: str) -> Dict[str, Any]:
-        path = Path(report_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Document not found: {report_path}")
+    def _extract_metrics(self, collection: Any, company_name: str, document_id: str, analysis_id: str, report_year: int | str, path: Path) -> dict[str, Any]:
+        from extraction_agent import extract_report_metrics
+        records = self._get_current_document_records(collection, company_name, document_id)
+        if not records:
+            return {}
+        text = "\n\n".join(doc for doc, _ in records)
+        metrics = extract_report_metrics(text, metadata=records[0][1])
+        metrics.update({
+            "analysis_id": analysis_id,
+            "document_id": document_id,
+            "company_name": company_name,
+            "report_year": report_year,
+            "source_text": text,
+            "source": path.name,
+            "source_file": path.name,
+        })
+        chunk_ids = [str(meta.get("chunk_id")) for _, meta in records if meta.get("chunk_id")]
+        metrics["source_chunks"] = list(dict.fromkeys(chunk_ids))
+        metrics["chunk_id"] = metrics["source_chunks"][0] if metrics["source_chunks"] else None
+        return metrics
 
-        analysis_id = str(uuid.uuid4())
-        document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{company_name}:{report_year}:{path.name}"))
-        if not company_name:
-            raise ValueError("company_name is required")
-        if not report_year:
-            raise ValueError("report_year is required")
-        if not question:
-            raise ValueError("question is required")
-
-        print(f"CHROMA PATH={self.chroma_path}")
-        print(f"COLLECTION NAME={self.collection_name}")
-        collection = self.document_agent.collection
-        print(f"COLLECTION COUNT BEFORE INGESTION={collection.count()}")
-        print(f"COMPANY NAME={company_name}")
-        print(f"DOCUMENT ID={document_id}")
-        print(f"ANALYSIS ID={analysis_id}")
-
-        result = self.document_agent.ingest_document(
-            str(path),
-            analysis_id=analysis_id,
-            document_id=document_id,
-            company_name=company_name,
-            report_year=str(report_year),
-        )
-        if result.get("status") != "success":
-            raise ValueError(result.get("error") or "Document ingestion failed")
-
-        collection = self.document_agent.collection
-        total_after_ingest = collection.count()
-        print(f"COLLECTION COUNT AFTER INGESTION={total_after_ingest}")
-        if total_after_ingest == 0:
-            raise ValueError(f"Ingestion failed: collection {self.collection_name} is empty after processing {path.name}")
-
-        sample = collection.get(limit=1, include=["documents", "metadatas"])
-        print(f"FIRST INGESTED METADATA={sample.get('metadatas', [{}])[0] if sample.get('metadatas') else {}}")
-        company_query = collection.query(
-            query_texts=[question],
-            n_results=4,
-            where={"company_name": company_name},
-            include=["documents", "metadatas", "distances"],
-        )
-        returned_docs = (company_query.get("documents") or [[]])[0]
-        print(f"COMPANY FILTER RESULT COUNT={len(returned_docs)}")
-        print(f"COMPANY FILTER METADATA={company_query.get('metadatas', [[]])[0]}")
-        if len(returned_docs) == 0:
-            raise ValueError(
-                f"Company filter returned zero results for company_name={company_name} in collection={self.collection_name}. "
-                "Stored metadata is incompatible with the canonical contract."
-            )
-
+    def _research(self, collection: Any, company_name: str, question: str) -> tuple[dict[str, Any], ResearchAgent]:
         agent = ResearchAgent(collection)
         answer = agent.answer(question, top_k=4, company=company_name)
-
         citations: List[Dict[str, Any]] = []
         for step in answer.steps:
             for citation in step.citations:
-                citation_payload = {
+                citations.append({
                     "company": citation.company,
                     "doc_type": citation.doc_type,
                     "section": citation.section,
@@ -145,134 +96,119 @@ class AnalysisWorkflow:
                     "chunk_id": citation.chunk_id,
                     "score": citation.score,
                     "snippet": citation.snippet,
-                }
-                citations.append(citation_payload)
+                })
+        return {"answer": answer.final_answer, "evidence": citations, "sources": citations}, agent
 
-        red_flag_query = f"{company_name} financial report risks financial statements performance"
-        raw_results = collection.query(
-            query_texts=[red_flag_query],
-            n_results=5,
-            where={"company_name": company_name},
-            include=["documents", "metadatas", "distances"],
+    def _red_flags(self, collection: Any, company_name: str) -> dict[str, Any]:
+        query = f"{company_name} financial report risks financial statements performance"
+        raw = collection.query(query_texts=[query], n_results=5, where={"company_name": company_name}, include=["documents", "metadatas", "distances"])
+        chunks = [
+            {"document": doc, "metadata": meta or {}}
+            for doc, meta in zip((raw.get("documents") or [[]])[0], (raw.get("metadatas") or [[]])[0])
+        ]
+        # Explicitly read the environment at call time. This preserves the
+        # existing Red Flag Agent fallback behavior when tests remove the key.
+        gemini_service = GeminiService(api_key=os.getenv("GEMINI_API_KEY") or "")
+        return RedFlagCrew(gemini_service=gemini_service).analyze(company_name, chunks)
+
+    def run_initial_analysis(
+        self,
+        report_path: str,
+        *,
+        analysis_id: str | None = None,
+        document_id: str | None = None,
+        company_name: str | None = None,
+        report_year: int | str | None = None,
+        question: str | None = None,
+    ) -> Dict[str, Any]:
+        path = Path(report_path)
+        if not path.exists():
+            raise FileNotFoundError("Document not found")
+        analysis_id = analysis_id or str(uuid.uuid4())
+        document_id = document_id or str(uuid.uuid4())
+        company_name = company_name or path.stem
+        report_year = report_year or "Unknown"
+        question = question or f"What are the major financial developments and risks in {company_name}'s report?"
+
+        self.document_agent.ingest_document(str(path), analysis_id=analysis_id, document_id=document_id, company_name=company_name, report_year=str(report_year))
+        collection = self.document_agent.collection
+        extraction = self._extract_metrics(collection, company_name, document_id, analysis_id, report_year, path)
+        research, _ = self._research(collection, company_name, question)
+        red_flags = self._red_flags(collection, company_name)
+        comparison = {"comparison_type": "pending", "records": [], "summary": {}, "metadata": {"analysis_id": analysis_id, "document_id": document_id}}
+        report = ReportAgent().generate(
+            extraction=extraction,
+            research=research,
+            red_flags=red_flags,
+            comparison=comparison,
+            metadata={"analysis_id": analysis_id, "document_id": document_id, "company_name": company_name, "report_year": report_year, "chunk_id": extraction.get("chunk_id")},
         )
+        return {"analysis_id": analysis_id, "document_id": document_id, "company_name": company_name, "report_year": report_year, "extraction": extraction, "research": research, "red_flags": red_flags, "comparison": comparison, "report": report}
 
-        retrieved_chunks: List[Dict[str, Any]] = []
-        documents = (raw_results.get("documents") or [[]])[0]
-        metadatas = (raw_results.get("metadatas") or [[]])[0]
-        for document, metadata in zip(documents, metadatas):
-            retrieved_chunks.append({"document": document, "metadata": metadata or {}})
+    def run_research_query(self, analysis: Dict[str, Any], question: str) -> dict[str, Any]:
+        collection = self.document_agent.collection
+        company_name = analysis.get("company_name") or analysis.get("metadata", {}).get("company_name")
+        result, _ = self._research(collection, company_name, question)
+        return result
 
-        gemini_service = GeminiService()
-        red_flag_result = RedFlagCrew(gemini_service=gemini_service).analyze(company_name, retrieved_chunks)
+    def run_red_flags_query(self, analysis: Dict[str, Any], question: str) -> dict[str, Any]:
+        collection = self.document_agent.collection
+        company_name = analysis.get("company_name") or analysis.get("metadata", {}).get("company_name")
+        # Reuse the existing risk-agent flow; the question only controls retrieval.
+        raw = collection.query(query_texts=[question], n_results=5, where={"company_name": company_name}, include=["documents", "metadatas", "distances"])
+        chunks = [{"document": doc, "metadata": meta or {}} for doc, meta in zip((raw.get("documents") or [[]])[0], (raw.get("metadatas") or [[]])[0])]
+        service = GeminiService(api_key=os.getenv("GEMINI_API_KEY") or "")
+        return RedFlagCrew(gemini_service=service).analyze(company_name, chunks)
 
-        extracted_metrics = {}
-        if collection is not None:
-            from extraction_agent import extract_report_metrics
+    def run_comparison(
+        self,
+        *,
+        analysis_id: str,
+        original_extraction: dict[str, Any],
+        comparison_extraction: dict[str, Any],
+    ) -> dict[str, Any]:
+        # The existing compare implementation is the sole comparison logic.
+        from compare import compare_company_metrics
+        companies = [original_extraction, comparison_extraction]
+        records = []
+        for metric in ("Revenue", "Operating Income", "Net Income", "Total Assets", "Total Liabilities", "Cash Flow", "EPS"):
+            a = {"company_name": original_extraction.get("company_name"), "value": original_extraction.get(metric.lower().replace(" ", "_")), "metric": metric}
+            b = {"company_name": comparison_extraction.get("company_name"), "value": comparison_extraction.get(metric.lower().replace(" ", "_")), "metric": metric}
+            if a["value"] is None and b["value"] is None:
+                continue
+            records.append(compare_company_metrics(a, b, metric_name=metric))
+        return {"analysis_id": analysis_id, "companies": [c.get("company_name") for c in companies], "records": records, "summary": {"metrics_compared": len(records)}, "metadata": {"document_ids": [original_extraction.get("document_id"), comparison_extraction.get("document_id")]}}
 
-            current_records = self._get_current_document_records(collection, company_name, document_id)
-            if current_records:
-                combined_text = "\n\n".join(doc for doc, _ in current_records if isinstance(doc, str))
-                first_meta = current_records[0][1] if current_records else {}
-                extracted_metrics = extract_report_metrics(combined_text, metadata=first_meta)
-                extracted_metrics["analysis_id"] = analysis_id
-                extracted_metrics["document_id"] = document_id
-                extracted_metrics["company_name"] = company_name
-                extracted_metrics["report_year"] = report_year
-                extracted_metrics["source_text"] = combined_text
-                extracted_metrics["source"] = str(path.name)
-                extracted_metrics["source_file"] = str(path.name)
-                relevant_chunk_ids: List[str] = []
-                for _, meta in current_records:
-                    if not isinstance(meta, dict):
-                        continue
-                    chunk_id = meta.get("chunk_id")
-                    if not chunk_id:
-                        continue
-                    section_title = str(meta.get("section_title") or meta.get("section") or "").strip()
-                    if section_title and section_title.lower() != "unknown":
-                        relevant_chunk_ids.append(str(chunk_id))
-                if not relevant_chunk_ids:
-                    relevant_chunk_ids = [
-                        str(meta.get("chunk_id"))
-                        for _, meta in current_records
-                        if isinstance(meta, dict) and meta.get("chunk_id")
-                    ]
-                extracted_metrics["source_chunks"] = list(dict.fromkeys(str(chunk_id) for chunk_id in relevant_chunk_ids if chunk_id))
-                extracted_metrics["chunk_id"] = extracted_metrics["source_chunks"][0] if extracted_metrics["source_chunks"] else None
+    def generate_pdf_report(self, report: dict[str, Any], output_file: str) -> str:
+        from models import ExtractionData, RedFlagData, ComparisonData, ResearchItem, ReportData, RiskItem, CompanyComparison
+        extraction = report.get("extraction") or {}
+        extraction_data = ExtractionData(company_name=extraction.get("company_name") or "Unknown", revenue=None)
+        for key in ("revenue", "net_income", "eps", "operating_income", "assets", "liabilities", "cash_flow"):
+            if key in extraction and isinstance(extraction[key], (int, float)):
+                setattr(extraction_data, key, extraction[key])
+        red = report.get("red_flags") or {}
+        risks = [RiskItem(category=str(x.get("category", "risk")), description=str(x.get("description", "")), severity=str(x.get("severity", "Medium"))) for x in red.get("flags", []) if isinstance(x, dict)]
+        research = [ResearchItem(question="", answer=str(report.get("research", {}).get("answer", "")), evidence=str(x.get("snippet", "")), source=str(x.get("source_file", ""))) for x in report.get("research", {}).get("evidence", []) if isinstance(x, dict)]
+        comparison = ComparisonData(companies=[])
+        report_data = ReportData(extraction=extraction_data, red_flags=RedFlagData(risks=risks), comparison=comparison, research=research)
+        from report_service import ReportService
+        ReportService().generate(report_data, output_file)
+        return output_file
 
-        comparison_result = compare_report_metrics(extracted_metrics)
-
-        report_agent = ReportAgent()
-        report_result = report_agent.generate(
-            extraction=extracted_metrics,
-            research={"answer": answer.final_answer, "sources": citations},
-            red_flags=red_flag_result,
-            comparison=comparison_result,
-            metadata={
-                "analysis_id": analysis_id,
-                "document_id": document_id,
-                "company_name": company_name,
-                "report_year": report_year,
-                "chunk_id": None,
-            },
-        )
-
-        comparison_payload = comparison_result if isinstance(comparison_result, dict) else dict(comparison_result)
-        comparison_payload = comparison_result if hasattr(comparison_result, "columns") else ComparisonResult(comparison_payload)
-
-        context = {
-            "metadata": {
-                "analysis_id": analysis_id,
-                "document_id": document_id,
-                "company_name": company_name,
-                "report_year": int(report_year) if str(report_year).strip().isdigit() else report_year,
-                "chunk_id": extracted_metrics.get("chunk_id") if isinstance(extracted_metrics, dict) else None,
-            },
-            "extraction": extracted_metrics,
-            "research": {
-                "answer": answer.final_answer,
-                "evidence": citations,
-                "sources": citations,
-                "metadata": {
-                    "analysis_id": analysis_id,
-                    "document_id": document_id,
-                    "company_name": company_name,
-                    "report_year": int(report_year) if str(report_year).strip().isdigit() else report_year,
-                },
-            },
-            "red_flags": {
-                "overall_risk": red_flag_result.get("overall_risk", "Low"),
-                "total_flags": int(red_flag_result.get("total_flags", 0)),
-                "flags": red_flag_result.get("flags", []),
-                "execution_time": float(red_flag_result.get("execution_time", 0.0)),
-                "model_used": red_flag_result.get("model_used", "offline-fallback"),
-                "metadata": {
-                    "analysis_id": analysis_id,
-                    "document_id": document_id,
-                    "company_name": company_name,
-                    "report_year": int(report_year) if str(report_year).strip().isdigit() else report_year,
-                },
-            },
-            "comparison": comparison_payload,
-            "report": report_result,
-        }
-
-        validated_context = validate_analysis_context(context)
-        response = {
-            "status": "success",
-            "analysis": validated_context.model_dump(mode="json"),
-            "metadata": context["metadata"],
-            "analysis_id": analysis_id,
-            "document_id": document_id,
-            "company_name": company_name,
-            "report_year": str(report_year),
-            "extraction": extracted_metrics,
-            "research": context["research"],
-            "red_flags": context["red_flags"],
-            "comparison": comparison_payload,
-            "report": report_result,
-            "answer": answer.final_answer,
-            "sources": citations,
-        }
-
-        return response
+    def run_analysis(self, report_path: str, company_name: str, report_year: str, question: str) -> Dict[str, Any]:
+        """Legacy synchronous entry point retained for existing tests."""
+        analysis_id = str(uuid.uuid4())
+        document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{company_name}:{report_year}:{Path(report_path).name}"))
+        result = self.run_initial_analysis(report_path, analysis_id=analysis_id, document_id=document_id, company_name=company_name, report_year=report_year, question=question)
+        # Legacy tests expect year-over-year comparison during the legacy path.
+        comparison = compare_report_metrics(result["extraction"])
+        result["comparison"] = comparison
+        result["report"] = ReportAgent().generate(extraction=result["extraction"], research=result["research"], red_flags=result["red_flags"], comparison=comparison, metadata={"analysis_id": analysis_id, "document_id": document_id, "company_name": company_name, "report_year": report_year, "chunk_id": result["extraction"].get("chunk_id")})
+        context = {"metadata": {"analysis_id": analysis_id, "document_id": document_id, "company_name": company_name, "report_year": int(report_year) if str(report_year).isdigit() else report_year, "chunk_id": result["extraction"].get("chunk_id")}, "extraction": result["extraction"], "research": result["research"], "red_flags": result["red_flags"], "comparison": result["comparison"], "report": result["report"]}
+        validated = validate_analysis_context(context)
+        result["analysis"] = validated.model_dump(mode="json")
+        result["metadata"] = context["metadata"]
+        result["status"] = "success"
+        result["answer"] = result["research"].get("answer", "")
+        result["sources"] = result["research"].get("sources", [])
+        return result
