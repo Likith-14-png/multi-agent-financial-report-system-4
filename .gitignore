@@ -77,3 +77,9 @@ transformers_cache/
 # Local backup files
 *~
 *.bak
+.env
+**/.env
+
+__pycache__/
+*.pyc
+tmp_uploads/
