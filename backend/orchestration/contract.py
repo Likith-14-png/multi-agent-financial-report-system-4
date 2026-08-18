@@ -179,5 +179,48 @@ class ApiResponse(BaseModel):
     report_year: Optional[int | str] = None
 
 
+class UploadResponse(BaseModel):
+    analysis_id: str
+    document_id: str
+    status: str
+    message: str
+
+
+class StatusResponse(BaseModel):
+    analysis_id: str
+    status: str
+    current_agent: Optional[str] = None
+    progress: Optional[int] = None
+
+
+class ResearchQueryRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000, examples=["Why did revenue increase?"])
+
+
+class ResearchQueryResponse(BaseModel):
+    analysis_id: str
+    status: str = "completed"
+    answer: str = ""
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class RedFlagQueryRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000, examples=["Why is supply chain disruption a risk?"])
+
+
+class ComparisonUploadResponse(BaseModel):
+    analysis_id: str
+    comparison_id: str
+    document_id: str
+    status: str
+    companies: List[str] = Field(default_factory=list)
+
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+
+
 def validate_analysis_context(payload: Dict[str, Any]) -> AnalysisContext:
     return AnalysisContext.model_validate(payload)
