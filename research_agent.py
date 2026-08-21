@@ -188,6 +188,41 @@ class QuestionIntentType(str, Enum):
 
 
 @dataclass
+class StructuredResearchPlan:
+    """Structured research plan derived dynamically from any financial question."""
+    entities: List[str] = field(default_factory=list)
+    companies: List[str] = field(default_factory=list)
+    metrics: List[str] = field(default_factory=list)
+    periods: List[str] = field(default_factory=list)
+    operations: List[str] = field(default_factory=list)
+    sub_questions: List[str] = field(default_factory=list)
+    calculation_requirements: List[Dict[str, Any]] = field(default_factory=list)
+    evidence_requirements: List[Dict[str, Any]] = field(default_factory=list)
+    is_causal: bool = False
+    is_comparative: bool = False
+    requires_calculation: bool = False
+    requires_ranking: bool = False
+    requires_citations: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entities": self.entities,
+            "companies": self.companies,
+            "metrics": self.metrics,
+            "periods": self.periods,
+            "operations": self.operations,
+            "sub_questions": self.sub_questions,
+            "calculation_requirements": self.calculation_requirements,
+            "evidence_requirements": self.evidence_requirements,
+            "is_causal": self.is_causal,
+            "is_comparative": self.is_comparative,
+            "requires_calculation": self.requires_calculation,
+            "requires_ranking": self.requires_ranking,
+            "requires_citations": self.requires_citations,
+        }
+
+
+@dataclass
 class FinancialQuestionIntent:
     original_question: str
     intent_type: QuestionIntentType
@@ -202,6 +237,7 @@ class FinancialQuestionIntent:
     calculation_type: Optional[str] = None
     requires_ranking: bool = False
     requires_citations: bool = False
+    research_plan: Optional[StructuredResearchPlan] = None
 
 
 def parse_numeric_value(raw: str) -> Optional[float]:
@@ -209,8 +245,10 @@ def parse_numeric_value(raw: str) -> Optional[float]:
     clean = str(raw).strip()
     if not clean:
         return None
-    # Handle negative parentheses: (95.4) -> -95.4
+    # Strip leading/trailing currencies and whitespace outside or inside parens
     is_negative = False
+    if clean.startswith("$") or clean.startswith("€") or clean.startswith("£"):
+        clean = clean[1:].strip()
     if clean.startswith("(") and clean.endswith(")"):
         is_negative = True
         clean = clean[1:-1].strip()
@@ -219,6 +257,10 @@ def parse_numeric_value(raw: str) -> Optional[float]:
         clean = clean.replace("$-", "").replace("-$", "").replace("-", "").strip()
 
     clean = clean.replace("$", "").replace("€", "").replace("£", "").replace(",", "").replace("%", "").strip()
+    if clean.endswith("-"):
+        is_negative = True
+        clean = clean[:-1].strip()
+
     # Handle magnitude suffixes
     mult = 1.0
     if clean.lower().endswith("billion") or clean.lower().endswith("bn") or clean.lower().endswith("b"):
@@ -249,6 +291,34 @@ def calculate_margin(numerator: float, denominator: float) -> Optional[float]:
     if denominator == 0:
         return None
     return (numerator / denominator) * 100.0
+
+
+@dataclass
+class ComparisonMatrix:
+    """Dynamic multi-dimensional Entity x Metric x Period matrix."""
+    entities: List[str] = field(default_factory=list)
+    metrics: List[str] = field(default_factory=list)
+    periods: List[str] = field(default_factory=list)
+    facts: Dict[Tuple[str, str, str], FinancialFact] = field(default_factory=dict)
+
+    def add_fact(self, fact: FinancialFact):
+        clean_ent = fact.entity.strip()
+        clean_metric = fact.metric.strip()
+        clean_period = fact.period.strip()
+        if clean_ent and clean_ent not in self.entities:
+            self.entities.append(clean_ent)
+        if clean_metric and clean_metric not in self.metrics:
+            self.metrics.append(clean_metric)
+        if clean_period and clean_period not in self.periods:
+            self.periods.append(clean_period)
+        self.facts[(clean_ent.lower(), clean_metric.lower(), clean_period)] = fact
+
+    def get_fact(self, entity: str, metric: str, period: str) -> Optional[FinancialFact]:
+        return self.facts.get((entity.lower().strip(), metric.lower().strip(), period.strip()))
+
+    def get_value(self, entity: str, metric: str, period: str) -> Optional[float]:
+        f = self.get_fact(entity, metric, period)
+        return f.value if f else None
 
 
 @dataclass
@@ -421,8 +491,8 @@ def extract_tables_from_text(text: str) -> List[ParsedTable]:
                     row_patterns.append((label, [v1, v2]))
 
     if row_patterns:
-        hdr_first = "Segment" if any(w in text.lower() for w in ["segment", "software", "consulting", "infrastructure", "products"]) else "Metric"
-        headers = [hdr_first] + [f"{y} Revenue" if "revenue" in text.lower() or "segment" in text.lower() else f"{y}" for y in distinct_years[:2]]
+        hdr_first = "Segment" if any(w in text.lower() for w in ["segment", "division", "line of business", "business unit", "product", "category", "geography"]) else "Metric"
+        headers = [hdr_first] + [f"{y} Revenue" if "revenue" in text.lower() or "segment" in text.lower() or "division" in text.lower() else f"{y}" for y in distinct_years[:2]]
         parsed_rows = [ParsedTableRow(label=lbl.replace("Total ", "").strip(), values=vals, raw_tokens=[]) for lbl, vals in row_patterns]
         tables.append(ParsedTable(title="Financial Breakdown", headers=headers, rows=parsed_rows, years=distinct_years[:2]))
 
@@ -639,6 +709,63 @@ class QuestionIntentAnalyzer:
         if "risk" in target_metrics:
             required_sections.append("Risk Factors")
 
+        # 11. Generate Structured Research Plan
+        operations: List[str] = []
+        if is_comparative:
+            operations.append("comparison")
+        if requires_calc:
+            operations.append("calculation")
+        if requires_ranking:
+            operations.append("ranking")
+        if is_causal:
+            operations.append("causal_explanation")
+        if requires_citations:
+            operations.append("citation")
+
+        sub_questions: List[str] = []
+        if is_causal and (is_comparative or target_entities):
+            sub_questions.append(f"What are the {', '.join(target_metrics) or 'financial metrics'} for {', '.join(target_entities) or 'the segments'} across {', '.join(target_years) or 'the reported periods'}?")
+            sub_questions.append("What are the management explanations, cost drivers, and factors for the changes in performance?")
+        else:
+            raw_parts = re.split(r"\?|;|\b(?:and\s+does|and\s+what|and\s+how|and\s+why|furthermore)\b", clean_q, flags=re.IGNORECASE)
+            parts = [p.strip(" ,.?") for p in raw_parts if p.strip(" ,.?")]
+            sub_questions = parts if len(parts) > 1 else [clean_q]
+
+        calc_reqs = []
+        if requires_calc:
+            calc_reqs.append({
+                "type": calc_type or "growth",
+                "entities": target_entities,
+                "periods": target_years,
+                "metrics": target_metrics,
+            })
+
+        evidence_reqs = []
+        for ent in (target_entities or [target_company or "Company"]):
+            for met in (target_metrics or ["revenue"]):
+                for yr in (target_years or ["2025", "2024"]):
+                    evidence_reqs.append({
+                        "entity": ent,
+                        "metric": met,
+                        "period": yr,
+                    })
+
+        plan = StructuredResearchPlan(
+            entities=target_entities,
+            companies=[target_company] if target_company else [],
+            metrics=target_metrics,
+            periods=target_years,
+            operations=operations,
+            sub_questions=sub_questions,
+            calculation_requirements=calc_reqs,
+            evidence_requirements=evidence_reqs,
+            is_causal=is_causal,
+            is_comparative=is_comparative,
+            requires_calculation=requires_calc,
+            requires_ranking=requires_ranking,
+            requires_citations=requires_citations,
+        )
+
         return FinancialQuestionIntent(
             original_question=question,
             intent_type=intent_type,
@@ -653,6 +780,7 @@ class QuestionIntentAnalyzer:
             calculation_type=calc_type,
             requires_ranking=requires_ranking,
             requires_citations=requires_citations,
+            research_plan=plan,
         )
 
 
@@ -668,18 +796,18 @@ class DynamicRetrievalPlanner:
         queries: List[str] = [intent.original_question]
         comp = f"{company_name} " if company_name else ""
         q_low = intent.original_question.lower()
-        years_str = " ".join(intent.target_years) if intent.target_years else "2025 2024"
+        years_str = " ".join(intent.target_years) if intent.target_years else ""
 
         # 1. Entity / Segment comparison queries
         if intent.target_entities:
             entities_str = " ".join(intent.target_entities)
-            queries.append(f"{comp}{entities_str} segment revenue breakdown {years_str}")
-            queries.append(f"{comp}Revenue & Segment Analysis {entities_str} {years_str}")
+            queries.append(f"{comp}{entities_str} segment revenue breakdown {years_str}".strip())
+            queries.append(f"{comp}Revenue & Segment Analysis {entities_str} {years_str}".strip())
             for ent in intent.target_entities:
-                queries.append(f"{comp}Total {ent} revenue {years_str} growth")
-        elif "segment" in intent.target_metrics or "segment" in q_low:
-            queries.append(f"{comp}segment revenue breakdown {years_str}")
-            queries.append(f"{comp}Revenue & Segment Analysis business segments results")
+                queries.append(f"{comp}Total {ent} revenue {years_str}".strip())
+        elif "segment" in intent.target_metrics or "segment" in q_low or "division" in q_low:
+            queries.append(f"{comp}segment revenue breakdown {years_str}".strip())
+            queries.append(f"{comp}Revenue & Segment Analysis business segments results".strip())
 
         # 2. Operating Margin & Operating Profitability queries
         if "operating_margin" in intent.target_metrics or "margin" in q_low:
@@ -723,19 +851,53 @@ class DynamicRetrievalPlanner:
 # ------------------------------------------------------------------ #
 
 class FinancialCalculator:
-    """Deterministic mathematical calculator for financial metrics, growth rates, and comparisons."""
+    """Deterministic mathematical calculator for financial metrics, growth rates, margins, CAGR, and ratios."""
 
     @staticmethod
     def calculate_growth_rate(curr: float, prev: float) -> Optional[float]:
+        """Calculate percentage growth: ((curr - prev) / abs(prev)) * 100."""
         if prev == 0:
             return None
         return ((curr - prev) / abs(prev)) * 100.0
 
     @staticmethod
+    def calculate_absolute_change(curr: float, prev: float) -> float:
+        """Calculate absolute difference: curr - prev."""
+        return curr - prev
+
+    @staticmethod
+    def calculate_cagr(start_val: float, end_val: float, num_periods: int) -> Optional[float]:
+        """Calculate Compound Annual Growth Rate: ((end / start) ** (1 / n) - 1) * 100."""
+        if start_val <= 0 or end_val <= 0 or num_periods <= 0:
+            return None
+        return ((end_val / start_val) ** (1.0 / num_periods) - 1.0) * 100.0
+
+    @staticmethod
     def calculate_margin(numerator: float, denominator: float) -> Optional[float]:
+        """Calculate margin percentage: (numerator / denominator) * 100."""
         if denominator == 0:
             return None
         return (numerator / denominator) * 100.0
+
+    @staticmethod
+    def calculate_ratio(val_a: float, val_b: float) -> Optional[float]:
+        """Calculate simple ratio: val_a / val_b."""
+        if val_b == 0:
+            return None
+        return val_a / val_b
+
+    @staticmethod
+    def calculate_percentage_point_change(curr_pct: float, prev_pct: float) -> float:
+        """Calculate change in percentage points: curr_pct - prev_pct."""
+        return curr_pct - prev_pct
+
+    @staticmethod
+    def verify_reported_vs_calculated(calculated: float, reported: float, tolerance: float = 0.5) -> Tuple[bool, str]:
+        """Verify if reported growth/margin matches calculated value within tolerance."""
+        diff = abs(calculated - reported)
+        if diff <= tolerance:
+            return True, f"Calculated value ({calculated:.2f}%) matches reported disclosure ({reported:.2f}%)."
+        return False, f"Variance detected: Calculated {calculated:.2f}% vs Reported {reported:.2f}% (difference: {diff:.2f}%)."
 
     @staticmethod
     def rank_entities_by_growth(
@@ -883,7 +1045,7 @@ class ResearchAgent:
             if inferred:
                 return inferred
             low = doc_text.lower()
-            if "segment" in low and ("revenue" in low or "consulting" in low or "software" in low or "infrastructure" in low):
+            if "segment" in low or "division" in low or "breakdown" in low or "line of business" in low:
                 return "Revenue & Segment Analysis"
             if "cash flow" in low or "operating activities" in low:
                 return "Cash Flow Statement"
@@ -1193,9 +1355,11 @@ class ResearchAgent:
             missing_entities = [ent for ent in intent.target_entities if ent.lower() not in retrieved_full_text]
             if missing_entities:
                 followup_queries = []
+                years_str = " ".join(intent.target_years) if intent.target_years else ""
+                metric_name = intent.target_metrics[0] if intent.target_metrics else "revenue"
                 for me in missing_entities:
-                    followup_queries.append(f"{target_company or ''} Total {me} segment revenue 2025 2024")
-                    followup_queries.append(f"{target_company or ''} {me} {intent.target_metrics[0] if intent.target_metrics else 'revenue'}")
+                    followup_queries.append(f"{target_company or ''} Total {me} segment {metric_name} {years_str}".strip())
+                    followup_queries.append(f"{target_company or ''} {me} {metric_name} {years_str}".strip())
                 extra_rows = self._execute_retrieval_queries(followup_queries, where_clauses, target_company, top_k * 2)
                 seen_ids = {r[0] for r in rows}
                 for er in extra_rows:
@@ -1238,7 +1402,7 @@ class ResearchAgent:
                     score -= 0.50
                 elif matching_ents == 1:
                     score -= 0.25
-                if any(st in sec_title for st in ["revenue & segment analysis", "segment analysis", "segment", "revenue"]):
+                if any(st in sec_title for st in ["revenue & segment analysis", "segment analysis", "segment", "revenue", "breakdown"]):
                     score -= 0.30
 
             # Operating Margin & Profitability Relevance
@@ -1269,7 +1433,7 @@ class ResearchAgent:
                     score -= 0.35
 
             elif "segment" in intent.target_metrics:
-                if any(w in text_low for w in ["segment", "software", "consulting", "infrastructure", "geography"]):
+                if any(w in text_low for w in ["segment", "division", "breakdown", "line of business", "product category", "geography"]):
                     score -= 0.30
 
             # Analytical & MD&A Section boost
@@ -1438,7 +1602,7 @@ class ResearchAgent:
         # Path A: Comparative Segment / Multi-Entity Revenue & Growth Analysis
         # -------------------------------------------------------------- #
         is_comparative_query = (
-            (intent.is_comparative or intent.requires_calculation or bool(intent.target_entities) or "segment" in question.lower() or "compare" in question.lower() or any(w in question.lower() for w in ["software", "consulting", "infrastructure"]))
+            (intent.is_comparative or intent.requires_calculation or bool(intent.target_entities) or "segment" in question.lower() or "compare" in question.lower() or "division" in question.lower() or "breakdown" in question.lower())
             and "eps" not in intent.target_metrics
             and "diluted eps" not in question.lower()
             and "earnings per share" not in question.lower()
@@ -1454,9 +1618,13 @@ class ResearchAgent:
                 if len(filtered_rows) >= 2:
                     t.rows = filtered_rows
 
+            years_list = t.years if len(t.years) >= 2 else (intent.target_years if len(intent.target_years) >= 2 else ["2025", "2024"])
+            curr_yr = years_list[0] if years_list else "Current"
+            prev_yr = years_list[1] if len(years_list) >= 2 else "Previous"
+
             md_table = t.to_markdown()
             lines = [
-                "### Segment Revenue and Growth Performance" if ("segment" in question.lower() or "software" in question.lower()) else "### Financial Performance Summary",
+                "### Segment Revenue and Growth Performance" if ("segment" in question.lower() or "division" in question.lower() or bool(intent.target_entities)) else "### Financial Performance Summary",
                 "",
                 md_table,
                 "",
@@ -1470,7 +1638,7 @@ class ResearchAgent:
                     g_str = f"{g:+.1f}%" if g is not None else "N/A"
                     val0_str = f"${r.values[0]:,.0f}M" if abs(r.values[0]) > 50 else f"${r.values[0]:,.2f}"
                     val1_str = f"${r.values[1]:,.0f}M" if abs(r.values[1]) > 50 else f"${r.values[1]:,.2f}"
-                    lines.append(f"- **{clean_lbl}:** Grew **{g_str}** year-over-year from {val1_str} in 2024 to {val0_str} in 2025.")
+                    lines.append(f"- **{clean_lbl}:** Grew **{g_str}** year-over-year from {val1_str} in {prev_yr} to {val0_str} in {curr_yr}.")
                     if g is not None:
                         ranked_segments.append((clean_lbl, val0_str, val1_str, g_str, g))
                 else:
@@ -1480,7 +1648,7 @@ class ResearchAgent:
                 ranked_segments.sort(key=lambda x: x[4], reverse=True)
                 fastest = ranked_segments[0]
                 lines.append("")
-                lines.append(f"**Segment Growth Ranking:**")
+                lines.append("**Segment Growth Ranking:**")
                 lines.append(f"- **{fastest[0]}** grew the most year-over-year at **{fastest[3]}** (from {fastest[2]} to {fastest[1]}).")
 
             if primary_cit:
@@ -1551,6 +1719,14 @@ class ResearchAgent:
             if ocf_m:
                 metric_findings.append(f"- **Net Cash Provided by Operating Activities:** ${ocf_m.group(1)} million")
 
+        # Revenue Extraction
+        if "revenue" in intent.target_metrics or "revenue" in question.lower() or "sales" in question.lower():
+            rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            if not rev_m:
+                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
+            if rev_m:
+                metric_findings.append(f"- **Total Revenue:** ${rev_m.group(1).strip()}")
+
         # Debt and Balance Sheet Extraction
         if ("debt" in intent.target_metrics or "equity" in intent.target_metrics or "debt" in question.lower() or "liabilities" in question.lower() or "equity" in question.lower()) and "margin" not in question.lower():
             debt_match = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
@@ -1574,11 +1750,11 @@ class ResearchAgent:
 
         if metric_findings and not intent.is_causal and "margin" not in question.lower():
             header_title = "Financial Metrics Summary"
-            if "eps" in intent.target_metrics:
+            if "eps" in intent.target_metrics and len(intent.target_metrics) == 1:
                 header_title = "Earnings Per Share (EPS) Analysis"
-            elif "cash_flow" in intent.target_metrics:
+            elif "cash_flow" in intent.target_metrics and len(intent.target_metrics) == 1:
                 header_title = "Cash Flow Performance"
-            elif "debt" in intent.target_metrics:
+            elif "debt" in intent.target_metrics and len(intent.target_metrics) == 1:
                 header_title = "Debt and Capital Structure"
 
             lines = [f"### {header_title}", ""] + metric_findings
@@ -1651,7 +1827,7 @@ class ResearchAgent:
                     for em in extracted_metrics:
                         lines.append(f"- **Metric Movement:** {em.capitalize()}")
                 else:
-                    lines.append(f"- Operating performance reflects underlying segment revenue changes and expense management reported in the filing.")
+                    lines.append("- Operating performance reflects underlying segment revenue changes and expense management reported in the filing.")
                 if distinct_factors:
                     lines.append(f"- Management discussion identified key operational drivers including {distinct_factors[0][:80].rstrip('.,')}...")
 
@@ -1661,16 +1837,18 @@ class ResearchAgent:
                     for idx, factor_text in enumerate(distinct_factors[:3], 1):
                         cit_str = find_cit_for_text(factor_text)
                         title = "Operational Performance Driver"
-                        if "software" in factor_text.lower():
-                            title = "Higher-Margin Segment & Portfolio Mix"
-                        elif "productivity" in factor_text.lower() or "cost" in factor_text.lower() or "expense" in factor_text.lower():
+                        if any(w in factor_text.lower() for w in ["margin", "portfolio", "mix", "expansion", "cloud", "recurring"]):
+                            title = "High-Margin Portfolio & Revenue Mix"
+                        elif "productivity" in factor_text.lower() or "cost" in factor_text.lower() or "expense" in factor_text.lower() or "saving" in factor_text.lower():
                             title = "Cost Structure & Operational Efficiency"
-                        elif "investment" in factor_text.lower() or "infrastructure" in factor_text.lower() or "r&d" in factor_text.lower():
-                            title = "Infrastructure & Capability Investments"
-                        elif "acquisition" in factor_text.lower() or "integration" in factor_text.lower():
+                        elif "investment" in factor_text.lower() or "r&d" in factor_text.lower() or "capacity" in factor_text.lower() or "capital" in factor_text.lower():
+                            title = "Strategic R&D & Capability Investments"
+                        elif "acquisition" in factor_text.lower() or "integration" in factor_text.lower() or "merger" in factor_text.lower():
                             title = "Acquisition & Business Integration"
-                        elif "workforce" in factor_text.lower() or "restructuring" in factor_text.lower():
+                        elif "workforce" in factor_text.lower() or "restructuring" in factor_text.lower() or "headcount" in factor_text.lower():
                             title = "Workforce Rebalancing & Restructuring Actions"
+                        else:
+                            title = "Operational Performance Driver"
 
                         lines.append(f"{idx}. **{title}:** {factor_text} Source: {cit_str}")
                 else:

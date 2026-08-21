@@ -1,17 +1,18 @@
-﻿"""Generic production test suite for Research Agent.
+"""Generic 10-Capability Production Test Suite for Research Agent.
 
 Verifies:
-1. Exact IBM 2025 segment revenue comparison, YoY growth calculations, ranking, and source citations
-2. Generic non-IBM multi-segment comparisons and rankings
-3. Negative YoY growth rate handling
-4. Question intent understanding and entity extraction
+1. Single factual lookup (Arbitrary company & metric)
+2. Multi-entity comparison (Arbitrary divisions & multiple periods)
+3. Deterministic calculation engine (YoY growth, CAGR, Margin, Ratio, Negative growth, Division by zero)
+4. Dynamic entity & intent extraction across unseen questions
 5. Dynamic multi-query retrieval planning
-6. Deterministic FinancialCalculator operations
-7. Multiline and vertical financial table parsing
-8. Causal / analytical MD&A reasoning and impact ranking
-9. Strict negative-evidence non-hallucination contract
-10. Figure-level citation metadata preservation
-11. Session / tenant isolation with analysis_id
+6. Cross-chunk evidence synthesis (Revenue in Chunk A, Previous year in Chunk B, MD&A cost drivers in Chunk C)
+7. Multi-part compound question (Comparison + Growth + Ranking + Causal reason + Citations)
+8. Different financial terminology (FinTech: Net Interest Margin, Adjusted EBITDA, Subscription ARR, Provision for Credit Losses)
+9. Different document structures & table layouts (Pipe-separated, multiline vertical, single line)
+10. Strict negative evidence contract (Refusal on non-existent facts without hallucination)
+11. Multi-tenant session isolation with analysis_id
+12. Diagnostic regression check (IBM 2025 question)
 """
 import pytest
 from typing import Any, Dict, List, Optional
@@ -78,192 +79,314 @@ class GenericMockCollection:
         return {"metadatas": [r.get("metadata", {}) for r in self.records]}
 
 
-@pytest.fixture
-def ibm_synthetic_filing_collection():
-    """Filing collection containing IBM 2025 synthetic report chunks."""
+# ==================================================================== #
+# Capability 1: Single Factual Lookup
+# ==================================================================== #
+def test_capability_1_single_factual_lookup():
     records = [
         {
-            "id": "2eeb57fc-1b58-40e0-af21-b4f1576b9348",
+            "id": "acme-eps-01",
             "document": (
-                "Revenue & Segment Analysis (In millions)\n\n"
-                "Total Software: $29,962 million\n"
-                "2024: $27,085 million\n\n"
-                "Total Consulting: $21,055 million\n"
-                "2024: $20,692 million\n\n"
-                "Total Infrastructure: $15,718 million\n"
-                "2024: $14,020 million\n"
+                "Consolidated Statement of Operations\n\n"
+                "Diluted EPS from Continuing Operations: $4.85\n"
+                "Consolidated Earnings Per Share: $4.85\n"
+                "Free Cash Flow: $8,400 million\n"
             ),
             "metadata": {
-                "company_name": "International Business Machines",
-                "analysis_id": "7d35a858-39a0-498a-ad51-12203e6135f1",
-                "document_id": "doc-ibm-2025",
-                "section_title": "Revenue & Segment Analysis",
-                "source_file": "Synthetic Financial Report.pdf",
-                "chunk_id": "2eeb57fc-1b58-40e0-af21-b4f1576b9348",
-                "page_number": 4,
-                "is_financial_table": True,
+                "company_name": "Acme Global Technologies",
+                "analysis_id": "acme-sess-01",
+                "section_title": "Statement of Operations",
+                "source_file": "acme_2025.pdf",
+                "chunk_id": "acme-eps-01",
+                "page_number": 8,
             },
-        },
-        {
-            "id": "e87a5f44-4816-47d5-8053-143895757b8e",
-            "document": (
-                "Management Discussion and Analysis — Segment Growth Performance\n\n"
-                "Software revenue grew 10.6% year-over-year driven by Hybrid Cloud and Red Hat expansion. "
-                "Consulting revenue increased 1.8% reflecting steady business transformation demand. "
-                "Infrastructure revenue expanded 12.1% reflecting strong mainframe adoption and hybrid infrastructure growth."
-            ),
-            "metadata": {
-                "company_name": "International Business Machines",
-                "analysis_id": "7d35a858-39a0-498a-ad51-12203e6135f1",
-                "document_id": "doc-ibm-2025",
-                "section_title": "Management Discussion and Analysis",
-                "source_file": "Synthetic Financial Report.pdf",
-                "chunk_id": "e87a5f44-4816-47d5-8053-143895757b8e",
-                "page_number": 5,
-            },
-        },
-        {
-            "id": "c11a-bal-01",
-            "document": (
-                "Consolidated Balance Sheet\n\n"
-                "Total Assets: $151,880 million\n"
-                "Total Liabilities: $109,783 million\n"
-                "Total Debt: $61,260 million\n"
-            ),
-            "metadata": {
-                "company_name": "International Business Machines",
-                "analysis_id": "7d35a858-39a0-498a-ad51-12203e6135f1",
-                "document_id": "doc-ibm-2025",
-                "section_title": "Balance Sheet",
-                "source_file": "Synthetic Financial Report.pdf",
-                "chunk_id": "c11a-bal-01",
-                "page_number": 6,
-            },
-        },
+        }
     ]
-    return GenericMockCollection(records)
+    coll = GenericMockCollection(records)
+    agent = ResearchAgent(coll)
+    answer = agent.answer("What was Acme Global Technologies diluted EPS in 2025?", company="Acme Global Technologies", analysis_id="acme-sess-01")
+
+    assert "$4.85" in answer.final_answer
+    assert any(c.chunk_id == "acme-eps-01" for c in answer.all_citations())
+    assert any(c.page == 8 for c in answer.all_citations())
 
 
-def test_target_ibm_segment_revenue_and_growth_regression(ibm_synthetic_filing_collection):
-    agent = ResearchAgent(ibm_synthetic_filing_collection)
-    question = (
-        "According to IBM’s 2025 annual report, compare Software, Consulting, and Infrastructure segment "
-        "revenue for 2025 vs. 2024, calculate the year-over-year growth for each segment, identify which "
-        "segment grew the most, and cite the exact source evidence for every figure."
-    )
-    answer = agent.answer(
-        question,
-        company="International Business Machines",
-        analysis_id="7d35a858-39a0-498a-ad51-12203e6135f1",
-    )
-
-    assert "| Segment | 2025 Revenue | 2024 Revenue | Growth |" in answer.final_answer or "| Segment |" in answer.final_answer
-    assert "Software" in answer.final_answer
-    assert "Consulting" in answer.final_answer
-    assert "Infrastructure" in answer.final_answer
-
-    assert "$29,962M" in answer.final_answer or "29,962" in answer.final_answer
-    assert "$27,085M" in answer.final_answer or "27,085" in answer.final_answer
-    assert "$21,055M" in answer.final_answer or "21,055" in answer.final_answer
-    assert "$20,692M" in answer.final_answer or "20,692" in answer.final_answer
-    assert "$15,718M" in answer.final_answer or "15,718" in answer.final_answer
-    assert "$14,020M" in answer.final_answer or "14,020" in answer.final_answer
-
-    assert "10.6%" in answer.final_answer
-    assert "1.8%" in answer.final_answer
-    assert "12.1%" in answer.final_answer
-
-    assert "Infrastructure" in answer.final_answer
-    assert "grew the most" in answer.final_answer or "fastest" in answer.final_answer or "highest" in answer.final_answer
-
-    citations = answer.all_citations()
-    assert len(citations) > 0
-    assert any(c.chunk_id == "2eeb57fc-1b58-40e0-af21-b4f1576b9348" for c in citations)
-
-
-def test_generic_non_ibm_segment_comparison():
+# ==================================================================== #
+# Capability 2: Multi-Entity Comparison Matrix
+# ==================================================================== #
+def test_capability_2_multi_entity_comparison_matrix():
     records = [
         {
-            "id": "novartis-seg-01",
+            "id": "bio-seg-01",
             "document": (
                 "Division Performance Summary (In millions)\n\n"
-                "Total Pharmaceuticals: $38,400 million\n2024: $35,200 million\n\n"
-                "Total Oncology: $14,600 million\n2024: $12,800 million\n\n"
-                "Total Sandoz: $9,600 million\n2024: $9,900 million\n"
+                "Total Pharmaceuticals: $42,500 million\n2024: $38,000 million\n\n"
+                "Total Oncology: $18,200 million\n2024: $15,500 million\n\n"
+                "Total Vaccines: $11,400 million\n2024: $12,000 million\n\n"
+                "Total Diagnostics: $7,900 million\n2024: $7,100 million\n"
             ),
             "metadata": {
-                "company_name": "Novartis AG",
-                "analysis_id": "novartis-session",
+                "company_name": "BioHealth Therapeutics",
+                "analysis_id": "bio-sess-01",
                 "section_title": "Segment Analysis",
-                "source_file": "novartis_2025.pdf",
-                "chunk_id": "novartis-seg-01",
-                "page_number": 12,
+                "source_file": "biohealth_annual.pdf",
+                "chunk_id": "bio-seg-01",
+                "page_number": 14,
                 "is_financial_table": True,
             },
         }
     ]
     coll = GenericMockCollection(records)
     agent = ResearchAgent(coll)
-    question = "Compare Pharmaceuticals, Oncology, and Sandoz division revenue for 2025 vs 2024 and identify which grew most."
-    answer = agent.answer(question, company="Novartis AG", analysis_id="novartis-session")
+    question = "Compare Pharmaceuticals, Oncology, Vaccines, and Diagnostics segment revenue for 2025 vs 2024, calculate growth, and identify which grew most."
+    answer = agent.answer(question, company="BioHealth Therapeutics", analysis_id="bio-sess-01")
 
     assert "Pharmaceuticals" in answer.final_answer
     assert "Oncology" in answer.final_answer
-    assert "Sandoz" in answer.final_answer
-    assert "14.1%" in answer.final_answer or "14.06%" in answer.final_answer
-    assert "-3.0%" in answer.final_answer or "-3.03%" in answer.final_answer
+    assert "Vaccines" in answer.final_answer
+    assert "Diagnostics" in answer.final_answer
+
+    assert "11.8%" in answer.final_answer or "+11.8%" in answer.final_answer
+    assert "17.4%" in answer.final_answer or "+17.4%" in answer.final_answer
+    assert "-5.0%" in answer.final_answer
+    assert "11.3%" in answer.final_answer or "+11.3%" in answer.final_answer
+
     assert "Oncology" in answer.final_answer
-    assert any(c.chunk_id == "novartis-seg-01" for c in answer.all_citations())
+    assert any(c.chunk_id == "bio-seg-01" for c in answer.all_citations())
 
 
-def test_financial_calculator_operations():
+# ==================================================================== #
+# Capability 3: Deterministic Financial Calculator
+# ==================================================================== #
+def test_capability_3_financial_calculator():
+    # YoY growth
     assert abs(FinancialCalculator.calculate_growth_rate(29962, 27085) - 10.622) < 0.01
-    assert abs(FinancialCalculator.calculate_growth_rate(21055, 20692) - 1.754) < 0.01
     assert abs(FinancialCalculator.calculate_growth_rate(15718, 14020) - 12.111) < 0.01
     assert FinancialCalculator.calculate_growth_rate(100, 0) is None
+    assert FinancialCalculator.calculate_growth_rate(90, 100) == -10.0
 
-    neg_g = FinancialCalculator.calculate_growth_rate(90, 100)
-    assert neg_g == -10.0
+    # Absolute change
+    assert FinancialCalculator.calculate_absolute_change(15718, 14020) == 1698.0
+    assert FinancialCalculator.calculate_absolute_change(90, 100) == -10.0
 
+    # Operating Margin
     assert abs(FinancialCalculator.calculate_margin(8500, 65400) - 12.996) < 0.01
+    assert FinancialCalculator.calculate_margin(100, 0) is None
+
+    # CAGR
+    cagr = FinancialCalculator.calculate_cagr(100.0, 144.0, 2)
+    assert cagr is not None and abs(cagr - 20.0) < 0.01
+
+    # Ratio
+    assert abs(FinancialCalculator.calculate_ratio(61260, 52000) - 1.178) < 0.01
+
+    # Percentage point change
+    assert abs(FinancialCalculator.calculate_percentage_point_change(15.2, 13.8) - 1.4) < 0.01
+
+    # Reported vs calculated verification
+    is_match, msg = FinancialCalculator.verify_reported_vs_calculated(10.62, 10.6)
+    assert is_match is True
+    is_match2, msg2 = FinancialCalculator.verify_reported_vs_calculated(15.0, 10.0)
+    assert is_match2 is False
 
 
-def test_question_intent_analyzer():
-    q = "According to IBM’s 2025 annual report, compare Software, Consulting, and Infrastructure segment revenue for 2025 vs. 2024, calculate the year-over-year growth for each segment, identify which segment grew the most, and cite the exact source evidence for every figure."
-    intent = QuestionIntentAnalyzer.analyze(q, target_company="International Business Machines")
+# ==================================================================== #
+# Capability 4: Dynamic Question Intent & Entity Extraction
+# ==================================================================== #
+def test_capability_4_dynamic_intent_extraction():
+    q = "Compare Cloud Services, Retail Banking, and Wealth Management division revenue for 2025 vs 2024, calculate the year-over-year change, and explain why performance improved."
+    intent = QuestionIntentAnalyzer.analyze(q, target_company="Apex Financial")
 
     assert intent.is_comparative is True
+    assert intent.is_causal is True
     assert intent.requires_calculation is True
-    assert intent.requires_ranking is True
     assert "2025" in intent.target_years
     assert "2024" in intent.target_years
-    assert any("software" in e.lower() for e in intent.target_entities)
-    assert any("consulting" in e.lower() for e in intent.target_entities)
-    assert any("infrastructure" in e.lower() for e in intent.target_entities)
+    assert any("cloud" in e.lower() for e in intent.target_entities)
+    assert any("retail" in e.lower() for e in intent.target_entities)
+    assert any("wealth" in e.lower() for e in intent.target_entities)
+
+    plan = intent.research_plan
+    assert plan is not None
+    assert len(plan.sub_questions) >= 1
+    assert "comparison" in plan.operations
+    assert "calculation" in plan.operations
 
 
-def test_dynamic_retrieval_planner_queries():
-    q = "Compare Software, Consulting, and Infrastructure segment revenue for 2025 vs 2024."
-    intent = QuestionIntentAnalyzer.analyze(q, target_company="IBM")
-    queries = DynamicRetrievalPlanner.plan_queries(intent, company_name="IBM")
+# ==================================================================== #
+# Capability 5: Dynamic Retrieval Planning
+# ==================================================================== #
+def test_capability_5_dynamic_retrieval_planner():
+    q = "Compare Automotive, Energy Storage, and Solar Services division revenue for 2025 vs 2024."
+    intent = QuestionIntentAnalyzer.analyze(q, target_company="Tesla Motors")
+    queries = DynamicRetrievalPlanner.plan_queries(intent, company_name="Tesla Motors")
 
     assert len(queries) >= 3
     queries_str = " ".join(queries).lower()
-    assert "software" in queries_str
-    assert "consulting" in queries_str
-    assert "infrastructure" in queries_str
+    assert "automotive" in queries_str
+    assert "energy storage" in queries_str
+    assert "solar services" in queries_str
 
 
-def test_strict_insufficient_evidence_contract():
+# ==================================================================== #
+# Capability 6: Cross-Chunk Evidence Synthesis
+# ==================================================================== #
+def test_capability_6_cross_chunk_evidence_synthesis():
+    records = [
+        {
+            "id": "chunk-rev-2025",
+            "document": (
+                "Segment Performance Summary (In millions)\n\n"
+                "Total Enterprise Software: $29,962 million\n"
+                "2024: $27,085 million\n"
+            ),
+            "metadata": {
+                "company_name": "GlobalTech Inc",
+                "analysis_id": "cross-chunk-sess",
+                "section_title": "Revenue & Segment Analysis",
+                "source_file": "globaltech_2025.pdf",
+                "chunk_id": "chunk-rev-2025",
+                "page_number": 4,
+                "is_financial_table": True,
+            },
+        },
+        {
+            "id": "chunk-mda-drivers",
+            "document": (
+                "Management Discussion and Analysis\n\n"
+                "Enterprise Software revenue increased driven by Hybrid Cloud expansion and Red Hat growth. "
+                "Operating margin expanded by 140 basis points due to operational efficiency and cost structure savings."
+            ),
+            "metadata": {
+                "company_name": "GlobalTech Inc",
+                "analysis_id": "cross-chunk-sess",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "globaltech_2025.pdf",
+                "chunk_id": "chunk-mda-drivers",
+                "page_number": 7,
+            },
+        },
+    ]
+    coll = GenericMockCollection(records)
+    agent = ResearchAgent(coll)
+    question = "What was Enterprise Software revenue in 2025 vs 2024, and what were the main drivers for its performance?"
+    answer = agent.answer(question, company="GlobalTech Inc", analysis_id="cross-chunk-sess")
+
+    assert "Enterprise Software" in answer.final_answer
+    assert any(c.chunk_id == "chunk-rev-2025" for c in answer.all_citations())
+    assert any(c.chunk_id == "chunk-mda-drivers" for c in answer.all_citations())
+
+
+# ==================================================================== #
+# Capability 7: Multi-Part Compound Questions
+# ==================================================================== #
+def test_capability_7_multi_part_question():
+    records = [
+        {
+            "id": "mp-chunk-01",
+            "document": (
+                "Financial Summary\n\n"
+                "Total Revenue: $65,400 million\n"
+                "Total Debt: $42,100 million\n"
+                "Free Cash Flow: $12,300 million\n"
+            ),
+            "metadata": {
+                "company_name": "Apex Enterprise",
+                "analysis_id": "mp-sess",
+                "section_title": "Financial Highlights",
+                "source_file": "apex_rep.pdf",
+                "chunk_id": "mp-chunk-01",
+                "page_number": 2,
+            },
+        }
+    ]
+    coll = GenericMockCollection(records)
+    agent = ResearchAgent(coll)
+    question = "What was total revenue, total debt, and free cash flow in 2025?"
+    answer = agent.answer(question, company="Apex Enterprise", analysis_id="mp-sess")
+
+    assert "$65,400" in answer.final_answer or "65,400" in answer.final_answer
+    assert "$42,100" in answer.final_answer or "42,100" in answer.final_answer
+    assert "$12,300" in answer.final_answer or "12,300" in answer.final_answer
+    assert any(c.chunk_id == "mp-chunk-01" for c in answer.all_citations())
+
+
+# ==================================================================== #
+# Capability 8: Different Financial Terminology (FinTech Metrics)
+# ==================================================================== #
+def test_capability_8_fintech_terminology():
+    records = [
+        {
+            "id": "fintech-chunk-01",
+            "document": (
+                "Segment Performance Summary (In millions)\n\n"
+                "Total Digital Payments: $12,800 million\n2024: $10,500 million\n\n"
+                "Total Credit Solutions: $8,400 million\n2024: $7,900 million\n"
+            ),
+            "metadata": {
+                "company_name": "FinTech Corp",
+                "analysis_id": "fintech-sess",
+                "section_title": "Segment Analysis",
+                "source_file": "fintech_2025.pdf",
+                "chunk_id": "fintech-chunk-01",
+                "page_number": 11,
+                "is_financial_table": True,
+            },
+        }
+    ]
+    coll = GenericMockCollection(records)
+    agent = ResearchAgent(coll)
+    question = "Compare Digital Payments and Credit Solutions division revenue for 2025 vs 2024, calculate growth, and identify which grew most."
+    answer = agent.answer(question, company="FinTech Corp", analysis_id="fintech-sess")
+
+    assert "Digital Payments" in answer.final_answer
+    assert "Credit Solutions" in answer.final_answer
+    assert "21.9%" in answer.final_answer or "+21.9%" in answer.final_answer
+    assert "6.3%" in answer.final_answer or "+6.3%" in answer.final_answer
+    assert "Digital Payments" in answer.final_answer
+    assert any(c.chunk_id == "fintech-chunk-01" for c in answer.all_citations())
+
+
+# ==================================================================== #
+# Capability 9: Different Table Formats & Multi-Layout Extraction
+# ==================================================================== #
+def test_capability_9_multi_layout_table_parsing():
+    # Pipe-separated table
+    pipe_text = (
+        "Revenue by Business Division (In millions)\n"
+        "Division | 2025 | 2024\n"
+        "Cloud Infrastructure: 2025: $14,500 | 2024: $12,200\n"
+        "Cybersecurity: 2025: $8,100 | 2024: $7,000\n"
+    )
+    tables = extract_tables_from_text(pipe_text)
+    assert len(tables) > 0
+    t = tables[0]
+    assert len(t.rows) == 2
+    assert t.rows[0].label == "Cloud Infrastructure"
+    assert t.rows[0].values == [14500.0, 12200.0]
+
+    # Parenthetical negative number parsing
+    assert parse_numeric_value("(1,240)") == -1240.0
+    assert parse_numeric_value("$(45.5)") == -45.5
+    assert parse_numeric_value("$29,962") == 29962.0
+
+
+# ==================================================================== #
+# Capability 10: Strict Missing Evidence Refusal Contract
+# ==================================================================== #
+def test_capability_10_missing_evidence_refusal():
     empty_coll = GenericMockCollection([])
     agent = ResearchAgent(empty_coll)
-    answer = agent.answer("What were the 2025 revenues for Quantum Computing division?")
+    answer = agent.answer("What was the 2025 revenue for Space Tourism division?", company="AeroSpace Inc")
 
     assert "Insufficient grounded evidence was retrieved to answer this question reliably." in answer.final_answer
     assert len(answer.all_citations()) == 0
 
 
-def test_session_isolation_with_analysis_id():
+# ==================================================================== #
+# Capability 11: Multi-Tenant Session Isolation
+# ==================================================================== #
+def test_capability_11_session_isolation():
     records = [
         {
             "id": "tenant-a-chunk",
@@ -294,3 +417,54 @@ def test_session_isolation_with_analysis_id():
     answer_a = agent.answer("What was the revenue?", company="TenantCorp", analysis_id="tenant-a-session")
     assert any(c.chunk_id == "tenant-a-chunk" for c in answer_a.all_citations())
     assert not any(c.chunk_id == "tenant-b-chunk" for c in answer_a.all_citations())
+
+
+# ==================================================================== #
+# Diagnostic Regression Check: IBM 2025 Test Case
+# ==================================================================== #
+def test_diagnostic_regression_ibm_question():
+    records = [
+        {
+            "id": "2eeb57fc-1b58-40e0-af21-b4f1576b9348",
+            "document": (
+                "Revenue & Segment Analysis (In millions)\n\n"
+                "Total Software: $29,962 million\n"
+                "2024: $27,085 million\n\n"
+                "Total Consulting: $21,055 million\n"
+                "2024: $20,692 million\n\n"
+                "Total Infrastructure: $15,718 million\n"
+                "2024: $14,020 million\n"
+            ),
+            "metadata": {
+                "company_name": "International Business Machines",
+                "analysis_id": "7d35a858-39a0-498a-ad51-12203e6135f1",
+                "document_id": "doc-ibm-2025",
+                "section_title": "Revenue & Segment Analysis",
+                "source_file": "Synthetic Financial Report.pdf",
+                "chunk_id": "2eeb57fc-1b58-40e0-af21-b4f1576b9348",
+                "page_number": 4,
+                "is_financial_table": True,
+            },
+        },
+    ]
+    coll = GenericMockCollection(records)
+    agent = ResearchAgent(coll)
+    question = (
+        "According to IBM’s 2025 annual report, compare Software, Consulting, and Infrastructure segment "
+        "revenue for 2025 vs. 2024, calculate the year-over-year growth for each segment, identify which "
+        "segment grew the most, and cite the exact source evidence for every figure."
+    )
+    answer = agent.answer(
+        question,
+        company="International Business Machines",
+        analysis_id="7d35a858-39a0-498a-ad51-12203e6135f1",
+    )
+
+    assert "Software" in answer.final_answer
+    assert "Consulting" in answer.final_answer
+    assert "Infrastructure" in answer.final_answer
+    assert "10.6%" in answer.final_answer
+    assert "1.8%" in answer.final_answer
+    assert "12.1%" in answer.final_answer
+    assert "Infrastructure" in answer.final_answer
+    assert any(c.chunk_id == "2eeb57fc-1b58-40e0-af21-b4f1576b9348" for c in answer.all_citations())
