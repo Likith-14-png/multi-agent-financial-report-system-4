@@ -314,9 +314,6 @@ async def health() -> dict[str, str]:
 )
 async def upload_analysis(
     file: UploadFile = File(..., description="Financial report file (PDF or TXT)"),
-    company_name: Optional[str] = Form(None, description="Optional company name override"),
-    report_year: Optional[str] = Form(None, description="Optional report fiscal year override"),
-    question: Optional[str] = Form(None, description="Optional specific research question"),
 ) -> dict[str, Any]:
     if not file or not file.filename or not file.filename.strip():
         raise HTTPException(status_code=400, detail="Document is required")
@@ -340,8 +337,6 @@ async def upload_analysis(
     try:
         doc_result = workflow.run_document_ingestion(
             report_path=temp_path,
-            company_name=company_name,
-            report_year=report_year,
         )
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -185,3 +185,16 @@ def test_health_endpoint_returns_ok():
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_document_agent_upload_openapi_schema_omits_optional_fields():
+    schema = app.openapi()
+    upload_body = schema["paths"]["/analysis/upload"]["post"]["requestBody"]
+    schema_ref = upload_body["content"]["multipart/form-data"]["schema"]
+    body_schema = schema["components"]["schemas"].get(schema_ref.get("$ref", "").split("/")[-1]) or schema_ref
+    properties = body_schema.get("properties", {})
+
+    assert "file" in properties
+    assert "company_name" not in properties
+    assert "report_year" not in properties
+    assert "question" not in properties
