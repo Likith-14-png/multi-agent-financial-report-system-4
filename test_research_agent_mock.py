@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from research_agent import ResearchAgent
 from tests.fake_chroma_collection import FakeChromaCollection
 
-SEED_DIR = os.path.join(os.path.dirname(__file__), "..", "seed_docs")
+SEED_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():

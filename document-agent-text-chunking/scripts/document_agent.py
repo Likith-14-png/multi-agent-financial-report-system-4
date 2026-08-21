@@ -10,6 +10,8 @@ import re
 import time
 import unicodedata
 import uuid
+import urllib.error
+import urllib.request
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -61,6 +63,10 @@ class DocumentAgentConfig:
     enable_document_versioning: bool = False
     history_log_path: Optional[str] = None
     ocr_callback: Optional[Callable[[Path], Tuple[str, List[Dict[str, Any]]]]] = None
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    ollama_timeout: float = 45.0
+    enable_llm_metadata_fallback: bool = True
 
 
 @dataclass
@@ -137,11 +143,18 @@ class DocumentAgent:
 
     def document_exists(self, doc_hash: str, analysis_id: Optional[str] = None) -> bool:
         try:
-            found = self.collection.get(where={"doc_hash": doc_hash}, limit=1, include=["metadatas"])
+            where: Dict[str, Any] = {"doc_hash": doc_hash}
+            if analysis_id:
+                where = {"$and": [{"doc_hash": doc_hash}, {"analysis_id": analysis_id}]}
+            found = self.collection.get(where=where, limit=1, include=["metadatas"])
             return bool(found.get("ids"))
         except Exception:
             found = self.collection.get(include=["metadatas"])
-            return any(m.get("doc_hash") == doc_hash for m in found.get("metadatas", []) or [] if isinstance(m, dict))
+            return any(
+                m.get("doc_hash") == doc_hash and (not analysis_id or m.get("analysis_id") == analysis_id)
+                for m in found.get("metadatas", []) or []
+                if isinstance(m, dict)
+            )
 
     def _source_chunk_ids(self, source: str) -> List[str]:
         """Return stored IDs for one source so overwrite can replace that version."""
@@ -162,13 +175,14 @@ class DocumentAgent:
     def normalize_text(text: str) -> str:
         """Normalize Unicode artifacts before metadata extraction."""
         normalized = unicodedata.normalize("NFKC", text or "")
+        normalized = normalized.replace("\u200b", "").replace("\ufeff", "").replace("\r", "")
         replacements = {
             "â€“": "-",
             "â€”": "-",
             "â€˜": "'",
             "â€™": "'",
             "â€œ": '"',
-            "â€�": '"',
+            "â€": '"',
             "â‚¬": "EUR",
             "Â£": "GBP",
             "â‚¹": "INR",
@@ -179,10 +193,22 @@ class DocumentAgent:
 
     def _resolve_file_path(self, value: str) -> Path:
         path = Path(value)
-        if path.is_absolute() or path.exists():
+        if path.is_absolute() and path.exists():
+            return path
+        if path.exists():
             return path
         base = Path(__file__).resolve().parent
-        for candidate in (base / path, base / "demo_data" / path.name, base.parent / path, base.parent / "demo_data" / path.name):
+        for candidate in (
+            base / path,
+            base / "demo_data" / path.name,
+            base.parent / path,
+            base.parent / "demo_data" / path.name,
+            base.parent.parent / "tmp_uploads" / path.name,
+            base.parent.parent / path,
+            base.parent.parent / "backend" / "tmp_uploads" / path.name,
+            Path.cwd() / path,
+            Path.cwd() / "tmp_uploads" / path.name,
+        ):
             if candidate.exists():
                 return candidate
         return path
@@ -418,18 +444,20 @@ class DocumentAgent:
             while index < len(raw_blocks):
                 block = raw_blocks[index]
                 kind = self._logical_block_type(block)
-                if kind == "heading":
-                    heading_title, heading_type = self._extract_section_heading_and_type(block)
-                    if heading_title:
-                        current_section_title = heading_title
-                        current_section_type = heading_type
-                    elif len(block.split()) <= 10:
-                        current_section_title = self._normalize_heading(block)
-                        current_section_type = "other"
-                    if index + 1 < len(raw_blocks):
-                        block = f"{block}\n\n{raw_blocks[index + 1]}"
-                        index += 1
-                        kind = "narrative"
+                heading_title, heading_type = self._extract_section_heading_and_type(block)
+                if heading_title:
+                    current_section_title = heading_title
+                    current_section_type = heading_type
+                elif kind == "heading":
+                    if len(block.split()) <= 10:
+                        clean_head = self._clean_section_heading(block)
+                        if clean_head:
+                            current_section_title = clean_head
+                            current_section_type = self._classify_section_type(block)
+                if kind == "heading" and index + 1 < len(raw_blocks):
+                    block = f"{block}\n\n{raw_blocks[index + 1]}"
+                    index += 1
+                    kind = "narrative"
                 if kind == "table":
                     normalized = self._normalize_table_block(block)
                     for table_block in self._split_table_block(normalized):
@@ -534,6 +562,429 @@ class DocumentAgent:
     def _matches(text: str, terms: Sequence[str]) -> str:
         return DocumentAgent._csv(term for term in terms if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text, re.I))
 
+    @staticmethod
+    def _is_valid_metadata_value(field: str, value: Any) -> bool:
+        if value is None:
+            return False
+        val_str = str(value).strip()
+        if not val_str or val_str.lower() in {"unknown", "none", "null", "n/a", "na"}:
+            return False
+        if field == "report_type":
+            return val_str.lower() not in {"other", "unknown", "none", "null"}
+        if field in {"report_year", "financial_year"}:
+            return bool(re.fullmatch(r"(?:19|20)\d{2}", val_str))
+        if field == "section_title":
+            if re.fullmatch(r"^\d+$", val_str):
+                return False
+            if val_str.lower() in {"unknown", "none", "null", "other", "table", "section"}:
+                return False
+        return True
+
+    def _call_qwen_for_missing_metadata(
+        self,
+        missing_fields: Sequence[str],
+        text_evidence: str,
+    ) -> Dict[str, str]:
+        """Query Qwen via Ollama as a fallback for missing metadata fields only."""
+        if not missing_fields:
+            return {}
+        if not getattr(self.config, "enable_llm_metadata_fallback", True):
+            return {}
+
+        ollama_url = getattr(self.config, "ollama_url", "http://localhost:11434") or "http://localhost:11434"
+        url = f"{ollama_url.rstrip('/')}/api/chat"
+        model = getattr(self.config, "ollama_model", "qwen2.5:7b") or "qwen2.5:7b"
+        timeout = getattr(self.config, "ollama_timeout", 45.0) or 45.0
+
+        missing_list_str = ", ".join(missing_fields)
+        system_instruction = (
+            "You are an expert financial report metadata extractor. "
+            "Your task is to extract ONLY the specific missing metadata fields requested by the user from the provided report text. "
+            "You must return ONLY a single valid JSON object containing exactly the requested keys. "
+            "If you cannot confidently determine a value from the text, return an empty string for that key instead of inventing or guessing. "
+            "Standard values guide:\n"
+            "- company_name: Official corporate/entity name (e.g. 'Microsoft Corporation', 'ABB Ltd', 'Infosys Limited'). Do not include report titles.\n"
+            "- company_ticker: Ticker symbol only if explicitly stated (e.g. 'MSFT', 'ABBN', 'INFY').\n"
+            "- report_year: 4-digit year (e.g. '2024').\n"
+            "- report_type: Exactly one of: 'Annual Report', '10-K', '10-Q', 'Integrated Report', 'Sustainability Report', 'Financial Report', 'Earnings Report', 'Proxy Statement', '20-F', or 'Other'.\n"
+            "- report_title: Document title (e.g. '2024 Annual Report').\n"
+            "- industry: Business sector or industry (e.g. 'Information Technology', 'Industrial Automation', 'Banking', 'Energy', 'Healthcare', 'Automotive', 'Retail').\n"
+            "- currency: Primary reporting currency code (e.g. 'USD', 'EUR', 'INR', 'GBP', 'JPY', 'CHF').\n"
+            "- filing_date: Official filing/report date if stated (e.g. 'July 30, 2024').\n"
+            "- fiscal_year_start: Start date of the fiscal period if stated.\n"
+            "- fiscal_year_end: End date of the fiscal period if stated."
+        )
+        user_content = (
+            f"Extract ONLY the following missing metadata fields: {missing_list_str}\n\n"
+            f"Document text evidence:\n{text_evidence[:3500]}"
+        )
+
+        payload = {
+            "model": model,
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 250,
+            },
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content},
+            ],
+        }
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data.get("message", {}).get("content", "").strip()
+                if not content:
+                    return {}
+                parsed = json.loads(content)
+                if not isinstance(parsed, dict):
+                    return {}
+
+                validated: Dict[str, str] = {}
+                for field in missing_fields:
+                    val = parsed.get(field)
+                    if val is None or not isinstance(val, (str, int, float)):
+                        continue
+                    val_str = str(val).strip()
+                    if not val_str or val_str.lower() in {"unknown", "none", "null", "n/a", "na"}:
+                        continue
+
+                    if field == "company_name":
+                        val_str = re.sub(r"\s+", " ", val_str).strip()
+                        if 2 <= len(val_str) <= 100 and not val_str.lower().startswith(("dear ", "for ", "to ")):
+                            validated[field] = val_str
+                    elif field == "company_ticker":
+                        cand_ticker = val_str.upper()
+                        if re.fullmatch(r"[A-Z]{1,5}", cand_ticker) and cand_ticker.lower() in text_evidence.lower():
+                            validated[field] = cand_ticker
+                    elif field in {"report_year", "financial_year"}:
+                        year_match = re.search(r"\b((?:19|20)\d{2})\b", val_str)
+                        if year_match:
+                            validated[field] = year_match.group(1)
+                    elif field == "report_type":
+                        allowed_types = {
+                            "annual report": "Annual Report",
+                            "form 10-k": "10-K",
+                            "10-k": "10-K",
+                            "form 10-q": "10-Q",
+                            "10-q": "10-Q",
+                            "form 20-f": "20-F",
+                            "20-f": "20-F",
+                            "integrated report": "Integrated Report",
+                            "sustainability report": "Sustainability Report",
+                            "esg report": "Sustainability Report",
+                            "financial report": "Financial Report",
+                            "earnings report": "Earnings Report",
+                            "earnings release": "Earnings Report",
+                            "proxy statement": "Proxy Statement",
+                            "other": "Other",
+                        }
+                        matched_type = allowed_types.get(val_str.lower())
+                        if matched_type:
+                            validated[field] = matched_type
+                        elif len(val_str) <= 50:
+                            validated[field] = val_str
+                    elif field in {"report_title", "document_title"}:
+                        if len(val_str) <= 200:
+                            validated[field] = re.sub(r"\s+", " ", val_str).strip()
+                    elif field == "industry":
+                        if len(val_str) <= 80:
+                            validated[field] = re.sub(r"\s+", " ", val_str).strip()
+                    elif field == "currency":
+                        curr_match = re.search(r"\b(USD|INR|EUR|GBP|JPY|CAD|AUD|CHF|SEK|CNY)\b|([$€£₹])", val_str, re.I)
+                        if curr_match:
+                            validated[field] = curr_match.group(1).upper() if curr_match.group(1) else {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}.get(curr_match.group(2), val_str)
+                        elif len(val_str) <= 10:
+                            validated[field] = val_str
+                    elif field in {"filing_date", "fiscal_year_start", "fiscal_year_end"}:
+                        if len(val_str) <= 40:
+                            validated[field] = val_str
+
+                if validated:
+                    logger.info("Qwen metadata fallback successfully extracted: %s", validated)
+                return validated
+        except Exception as exc:
+            logger.warning("Qwen metadata fallback unavailable or failed (%s). Continuing with existing metadata.", exc)
+            return {}
+
+    def _call_qwen_for_chunk_enrichment(
+        self,
+        chunk_text: str,
+        doc_context: Dict[str, Any],
+        page_numbers: List[int],
+    ) -> Dict[str, Any]:
+        """Query Qwen via Ollama to enrich metadata for a specific chunk with uncertainty or missing fields."""
+        if not getattr(self.config, "enable_llm_metadata_fallback", True):
+            return {}
+
+        ollama_url = getattr(self.config, "ollama_url", "http://localhost:11434") or "http://localhost:11434"
+        url = f"{ollama_url.rstrip('/')}/api/chat"
+        model = getattr(self.config, "ollama_model", "qwen2.5:7b") or "qwen2.5:7b"
+        timeout = getattr(self.config, "ollama_timeout", 45.0) or 45.0
+
+        page_str = ", ".join(map(str, page_numbers)) if page_numbers else "1"
+        system_instruction = (
+            "You are a strict financial document analyzer and metadata extractor.\n"
+            "Extract ONLY the requested metadata fields from the provided chunk text.\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. ONLY extract information that is explicitly stated in the chunk text or given document context.\n"
+            "2. DO NOT hallucinate, infer, or invent any numbers, entities, metrics, or titles.\n"
+            "3. If any field cannot be reliably determined from the text, return empty string \"\" for string fields, [] for list fields, and false for boolean fields.\n"
+            "4. Return ONLY a single valid JSON object. No other text.\n"
+            "5. Table rules: Pure narrative text discussing financial results is NOT a table (is_table=false, table_type=\"\"). Only set is_table=true if actual table columns and structured numerical rows exist.\n"
+            "6. Company ticker: Only extract if explicitly stated (e.g. 'Ticker: MSFT', 'NASDAQ: MSFT', 'SIX: ABBN').\n"
+            "7. Filing dates: Only extract if explicitly stated in text."
+        )
+
+        user_content = (
+            f"Document Context:\n"
+            f"- Company: {doc_context.get('company_name', '')}\n"
+            f"- Report Year: {doc_context.get('report_year', '')}\n"
+            f"- Report Type: {doc_context.get('report_type', '')}\n"
+            f"- Document Title: {doc_context.get('report_title', '')}\n"
+            f"- Source File: {doc_context.get('source_file', '')}\n"
+            f"- Page(s): {page_str}\n\n"
+            f"Chunk Text:\n\"\"\"\n{chunk_text[:1200]}\n\"\"\"\n\n"
+            f"Extract ONLY the following fields as a valid JSON object:\n"
+            f"- section_title (exact heading if present in chunk, else empty)\n"
+            f"- subsection_title (exact subheading if present in chunk, else empty)\n"
+            f"- section_type (one of: management_discussion, financial_statement, notes, business, risk, governance, sustainability, cover, summary, appendix, other)\n"
+            f"- company_ticker (ticker symbol if explicitly mentioned, else empty)\n"
+            f"- industry (industry sector if explicitly mentioned, else empty)\n"
+            f"- business_segments (array of business segments in chunk)\n"
+            f"- financial_metrics (array of metric: value strings in chunk, e.g. ['Revenue: $15.3 billion'])\n"
+            f"- financial_values (array of financial amounts in chunk, e.g. ['$15.3 billion', '14%'])\n"
+            f"- countries (array of countries mentioned in chunk)\n"
+            f"- people (array of key persons/executives mentioned in chunk)\n"
+            f"- organizations (array of companies/organizations in chunk)\n"
+            f"- products (array of products/services in chunk)\n"
+            f"- risks (array of specific risk categories in chunk)\n"
+            f"- investment_keywords (array of investment keywords in chunk)\n"
+            f"- currency (currency code if stated)\n"
+            f"- fiscal_year_start (start date if stated)\n"
+            f"- fiscal_year_end (end date if stated)\n"
+            f"- filing_date (filing date if stated)\n"
+            f"- is_audited (audited or unaudited if stated, else empty)\n"
+            f"- semantic_tags (array of supported high-level topic tags)\n"
+            f"- chunk_summary (concise 1-2 sentence factual summary based ONLY on chunk text)"
+        )
+
+        payload = {
+            "model": model,
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 150,
+            },
+            "messages": [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content},
+            ],
+        }
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data.get("message", {}).get("content", "").strip()
+                if not content:
+                    return {}
+                parsed = json.loads(content)
+                return parsed if isinstance(parsed, dict) else {}
+        except Exception as exc:
+            logger.warning("Qwen chunk enrichment unavailable or failed: %s", exc)
+            return {}
+
+    def _validate_and_merge_llm_chunk_metadata(
+        self,
+        base_meta: Dict[str, Any],
+        llm: Dict[str, Any],
+        chunk_text: str,
+        doc_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Strictly validate all LLM-extracted fields against chunk text before merging."""
+        if not isinstance(llm, dict) or not llm:
+            return base_meta
+
+        merged = dict(base_meta)
+        chunk_lower = chunk_text.lower()
+
+        # 1. section_title
+        if not merged.get("section_title") or merged.get("section_title") in {"Unknown", "other", "Other"}:
+            cand_title = str(llm.get("section_title") or "").strip()
+            if cand_title and cand_title.lower() not in {"unknown", "none", "null", "other", "table", "section"}:
+                clean_title = self._clean_section_heading(cand_title)
+                if clean_title:
+                    merged["section_title"] = clean_title
+
+        # 2. subsection_title
+        if not merged.get("subsection_title"):
+            cand_sub = str(llm.get("subsection_title") or "").strip()
+            if cand_sub and cand_sub.lower() not in {"unknown", "none", "null", "other"} and cand_sub.lower() in chunk_lower:
+                merged["subsection_title"] = self._clean_section_heading(cand_sub)
+
+        # 3. section_type
+        if merged.get("section_type") in {"other", "", None}:
+            cand_type = str(llm.get("section_type") or "").strip().lower()
+            valid_types = {
+                "management_discussion", "financial_statement", "notes", "business",
+                "risk", "governance", "sustainability", "cover", "summary", "appendix", "other"
+            }
+            if cand_type in valid_types:
+                merged["section_type"] = cand_type
+
+        # 4. company_ticker
+        if not merged.get("company_ticker"):
+            cand_ticker = str(llm.get("company_ticker") or "").strip().upper()
+            if re.fullmatch(r"[A-Z]{1,5}", cand_ticker) and (cand_ticker.lower() in chunk_lower or cand_ticker.lower() in str(doc_context.get("company_name", "")).lower()):
+                merged["company_ticker"] = cand_ticker
+
+        # 5. industry
+        if not merged.get("industry") or merged.get("industry") in {"Unknown", ""}:
+            cand_ind = str(llm.get("industry") or "").strip()
+            if cand_ind and cand_ind.lower() not in {"unknown", "none", "null"}:
+                merged["industry"] = cand_ind
+
+        # 6. financial_metrics
+        if not merged.get("financial_metrics"):
+            cand_metrics = llm.get("financial_metrics")
+            if isinstance(cand_metrics, list):
+                valid_m = []
+                for item in cand_metrics:
+                    if isinstance(item, str) and ":" in item:
+                        val_part = item.split(":", 1)[1].strip()
+                        num_match = re.search(r"[-+]?\$?\d[\d,]*(?:\.\d+)?", val_part)
+                        if num_match and num_match.group(0).replace("$", "").replace(",", "") in chunk_text.replace(",", ""):
+                            valid_m.append(item.strip())
+                if valid_m:
+                    merged["financial_metrics"] = ", ".join(valid_m)
+                    merged["financial_entities"] = merged["financial_metrics"]
+
+        # 7. financial_values
+        if not merged.get("financial_values"):
+            cand_vals = llm.get("financial_values")
+            if isinstance(cand_vals, list):
+                valid_v = []
+                for v in cand_vals:
+                    if isinstance(v, str) and v.strip():
+                        clean_v = v.strip()
+                        if clean_v.replace("$", "").replace(",", "").replace("%", "") in chunk_text.replace(",", ""):
+                            valid_v.append(clean_v)
+                if valid_v:
+                    merged["financial_values"] = ", ".join(valid_v)
+
+        # 8. List fields: countries, people, organizations, products, business_segments, risks, investment_keywords
+        for field, key in [
+            ("countries", "countries"),
+            ("people", "people"),
+            ("organizations", "organizations"),
+            ("products", "products"),
+            ("business_segments", "business_segments"),
+            ("risks", "risks"),
+            ("investment_keywords", "investment_keywords"),
+        ]:
+            if not merged.get(field):
+                items = llm.get(key)
+                if isinstance(items, list):
+                    valid_items = [
+                        str(it).strip() for it in items
+                        if str(it).strip() and str(it).strip().lower() in chunk_lower
+                    ]
+                    if valid_items:
+                        merged[field] = self._csv(valid_items)
+
+        # 9. is_audited
+        if not merged.get("is_audited"):
+            cand_aud = str(llm.get("is_audited") or "").strip().lower()
+            if cand_aud in {"audited", "unaudited"}:
+                merged["is_audited"] = cand_aud
+
+        # 10. semantic_tags
+        if not merged.get("semantic_tags"):
+            cand_tags = llm.get("semantic_tags")
+            if isinstance(cand_tags, list):
+                valid_tags = [str(t).strip() for t in cand_tags if str(t).strip()]
+                if valid_tags:
+                    merged["semantic_tags"] = self._csv(valid_tags)
+
+        # 11. chunk_summary
+        cand_summary = str(llm.get("chunk_summary") or "").strip()
+        if cand_summary and cand_summary.lower() not in {"contains report information.", "unknown", ""}:
+            if len(cand_summary.split()) >= 3:
+                merged["chunk_summary"] = cand_summary[:240]
+
+        # 12. Guaranteed Table Inconsistency Enforcement
+        if not merged.get("is_table", False):
+            merged["table_type"] = ""
+            merged["table_rows"] = 0
+            merged["table_columns"] = 0
+            merged["contains_table"] = "false"
+            merged["contains_financial_table"] = "false"
+
+        # Update confidence score
+        merged["confidence_score"] = self._compute_chunk_confidence(
+            doc=doc_context,
+            section_title=merged.get("section_title", ""),
+            financial_metrics=merged.get("financial_metrics", ""),
+            semantic_tags=merged.get("semantic_tags", ""),
+            chunk_type=merged.get("chunk_type", "narrative"),
+            is_table=bool(merged.get("is_table", False)),
+            table_type=str(merged.get("table_type", "")),
+        )
+
+        return merged
+
+    def _enrich_chunks_with_qwen(
+        self,
+        chunks: List[Dict[str, Any]],
+        metadatas: List[Dict[str, Any]],
+        doc_context: Dict[str, Any],
+    ) -> None:
+        """Enrich low-confidence or missing-metadata chunks using Qwen."""
+        if not getattr(self.config, "enable_llm_metadata_fallback", True):
+            return
+
+        # Target chunks with missing section titles or low confidence (< 0.40)
+        target_indices = [
+            i for i, meta in enumerate(metadatas)
+            if not self._is_valid_metadata_value("section_title", meta.get("section_title"))
+            or float(meta.get("confidence_score", 0.0)) < 0.40
+        ]
+        if not target_indices:
+            return
+
+        # Limit to a maximum of 2 targeted chunks per document to preserve high ingestion speed
+        for idx in target_indices[:2]:
+            chunk_record = chunks[idx]
+            chunk_text = chunk_record.get("text", "")
+            page_numbers = chunk_record.get("page_numbers", [1])
+            llm_result = self._call_qwen_for_chunk_enrichment(
+                chunk_text=chunk_text,
+                doc_context=doc_context,
+                page_numbers=page_numbers,
+            )
+            if llm_result:
+                metadatas[idx] = self._validate_and_merge_llm_chunk_metadata(
+                    base_meta=metadatas[idx],
+                    llm=llm_result,
+                    chunk_text=chunk_text,
+                    doc_context=doc_context,
+                )
+
+
     def _document_metadata(self, path: Path, text: str, pages: List[Dict[str, Any]]) -> Dict[str, str]:
         pdf_metadata: Dict[str, str] = {}
         if path.suffix.lower() == ".pdf":
@@ -560,7 +1011,7 @@ class DocumentAgent:
         currency = re.search(r"\b(USD|INR|EUR|GBP|JPY|CAD|AUD)\b|([$€£₹])", cover, re.I)
         language = "English" if len(re.findall(r"\b(?:the|and|of|for|financial|report|corporate|company)\b", cover, re.I)) >= 5 else ""
         industry = self._extract_industry(cover)
-        return {
+        doc = {
             "document_title": title,
             "report_title": title,
             "company_name": company,
@@ -574,7 +1025,59 @@ class DocumentAgent:
             "fiscal_year_end": boundary[-1] if len(boundary) > 1 else (boundary[0] if boundary else ""),
             "currency": (currency.group(1) or {"$": "USD", "€": "EUR", "£": "GBP", "₹": "INR"}.get(currency.group(2), "")) if currency else "",
             "industry": industry,
+            "company_ticker": "",
         }
+
+        # Check important metadata fields and determine which are missing
+        missing_fields: List[str] = []
+        if not self._is_valid_metadata_value("company_name", doc.get("company_name")):
+            missing_fields.append("company_name")
+        if not self._is_valid_metadata_value("report_year", doc.get("report_year")):
+            missing_fields.append("report_year")
+        if not self._is_valid_metadata_value("report_type", doc.get("report_type")):
+            missing_fields.append("report_type")
+        if not self._is_valid_metadata_value("report_title", doc.get("report_title")):
+            missing_fields.append("report_title")
+        if not self._is_valid_metadata_value("industry", doc.get("industry")):
+            missing_fields.append("industry")
+        if not self._is_valid_metadata_value("currency", doc.get("currency")):
+            missing_fields.append("currency")
+
+        if missing_fields and getattr(self.config, "enable_llm_metadata_fallback", True):
+            if not doc.get("filing_date"):
+                missing_fields.append("filing_date")
+            if not doc.get("fiscal_year_start"):
+                missing_fields.append("fiscal_year_start")
+            if not doc.get("fiscal_year_end"):
+                missing_fields.append("fiscal_year_end")
+            if not doc.get("company_ticker"):
+                missing_fields.append("company_ticker")
+            llm_metadata = self._call_qwen_for_missing_metadata(missing_fields, document_evidence)
+            if "company_name" in missing_fields and llm_metadata.get("company_name"):
+                doc["company_name"] = llm_metadata["company_name"]
+            if "report_year" in missing_fields and llm_metadata.get("report_year"):
+                doc["report_year"] = llm_metadata["report_year"]
+                doc["financial_year"] = llm_metadata["report_year"]
+            if "report_type" in missing_fields and llm_metadata.get("report_type"):
+                doc["report_type"] = llm_metadata["report_type"]
+            if "report_title" in missing_fields and llm_metadata.get("report_title"):
+                doc["report_title"] = llm_metadata["report_title"]
+                if not doc.get("document_title"):
+                    doc["document_title"] = llm_metadata["report_title"]
+            if "industry" in missing_fields and llm_metadata.get("industry"):
+                doc["industry"] = llm_metadata["industry"]
+            if "currency" in missing_fields and llm_metadata.get("currency"):
+                doc["currency"] = llm_metadata["currency"]
+            if "company_ticker" in missing_fields and llm_metadata.get("company_ticker"):
+                doc["company_ticker"] = llm_metadata["company_ticker"]
+            if "filing_date" in missing_fields and llm_metadata.get("filing_date"):
+                doc["filing_date"] = llm_metadata["filing_date"]
+            if "fiscal_year_start" in missing_fields and llm_metadata.get("fiscal_year_start"):
+                doc["fiscal_year_start"] = llm_metadata["fiscal_year_start"]
+            if "fiscal_year_end" in missing_fields and llm_metadata.get("fiscal_year_end"):
+                doc["fiscal_year_end"] = llm_metadata["fiscal_year_end"]
+
+        return doc
 
     @staticmethod
     def _extract_industry(text: str) -> str:
@@ -901,85 +1404,115 @@ class DocumentAgent:
 
     @staticmethod
     def _clean_section_heading(value: str) -> str:
-        cleaned = re.sub(r"\s+", " ", value or "").strip()
-        cleaned = re.sub(r"^[Pp]AGE\s+\d+\s*[-—:|]*\s*", "", cleaned)
+        if not value:
+            return ""
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        # Strip leading Page markers e.g. PAGE 10 — DEBT AND LIQUIDITY
+        cleaned = re.sub(r"^[Pp]AGE\s+\d+\s*[-—–:|]*\s*", "", cleaned)
+        # Strip leading section numbering e.g. 01 FINANCIAL REVIEW, 01. REVIEW, 1. BUSINESS, Item 7. MD&A
+        cleaned = re.sub(r"^(?:0[1-9]|[1-9]\d?)\s*[\.\:\-]\s*", "", cleaned)
+        cleaned = re.sub(r"^(?:0[1-9]|[1-9]\d?)\s+(?=[A-Za-z])", "", cleaned)
+        cleaned = re.sub(r"^(?:ITEM|SECTION|PART)\s+[0-9A-Za-z]+[\.\:\-]?\s*", "", cleaned, flags=re.I)
         cleaned = cleaned.replace("—", "-").replace("–", "-")
         cleaned = re.sub(r"^[-:|\s]+|[-:|\s]+$", "", cleaned)
         cleaned = re.sub(r"\s*[/|]\s*", " / ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+        # Discard if pure number or page number pattern or placeholder
+        if re.fullmatch(r"^\d+$", cleaned) or re.fullmatch(r"^[Pp]age\s*\d+$", cleaned, re.I) or cleaned.lower() in {"unknown", "none", "null", "other"}:
+            return ""
+
+        # If the heading is in ALL CAPS (and at least 3 letters), convert to clean Title Case
+        if cleaned.isupper() and len(re.findall(r"[A-Za-z]", cleaned)) >= 3:
+            words = cleaned.split()
+            cased = []
+            for w in words:
+                if w.upper() in {"MD&A", "ESG", "SEC", "GAAP", "CEO", "CFO", "US", "USA", "UK", "FY", "Q1", "Q2", "Q3", "Q4", "AI", "IT", "R&D", "ABB", "P&L", "EPS", "EBITDA", "ROIC", "ROE"}:
+                    cased.append(w.upper())
+                elif w.lower() in {"and", "of", "the", "for", "to", "in", "on", "at", "by", "with", "a", "an", "as"}:
+                    cased.append(w.lower())
+                else:
+                    cased.append(w.capitalize())
+            if cased:
+                cased[0] = cased[0].capitalize()
+            cleaned = " ".join(cased)
         return cleaned
+
+    @staticmethod
+    def _classify_section_type(text: str) -> str:
+        if not text:
+            return "other"
+        lowered = text.lower()
+        if re.search(r"\b(?:management['’]?s? discussion|md&a|operating and financial review|liquidity and capital resources|results of operations|financial review)\b", lowered):
+            return "management_discussion"
+        if re.search(r"\b(?:balance sheets?|statements? of (?:income|operations|earnings|cash flows?|financial position|shareholders'? equity)|financial highlights?|financial summary|statement of profit and loss|key notes and financial tables|debt and liquidity|debt profile)\b", lowered):
+            return "financial_statement"
+        if re.search(r"\b(?:notes to (?:consolidated )?financial statements?|notes forming part|footnotes?|key notes)\b", lowered):
+            return "notes"
+        if re.search(r"\b(?:business overview|our business|company overview|corporate profile|segment performance|products and services|r&d and innovation|research and development)\b", lowered):
+            return "business"
+        if re.search(r"\b(?:risk factors?|principal risks|risk management|market risk|cybersecurity risk)\b", lowered):
+            return "risk"
+        if re.search(r"\b(?:corporate governance|board of directors|board['’]s report|governance structure|remuneration report|legal,? audit and governance|auditor information)\b", lowered):
+            return "governance"
+        if re.search(r"\b(?:sustainability|esg|environmental,? social|corporate responsibility)\b", lowered):
+            return "sustainability"
+        if re.search(r"\b(?:letter to shareholders?|shareholders'? letter|message from (?:the )?(?:ceo|chairman|managing director))\b", lowered):
+            return "cover"
+        if re.search(r"\b(?:executive summary|summary of performance|highlights)\b", lowered):
+            return "summary"
+        if re.search(r"\b(?:auditor(?:'s)? report|independent auditor|audit report)\b", lowered):
+            return "financial_statement"
+        if re.search(r"\b(?:appendix|appendices|exhibits?|supplementary (?:data|information))\b", lowered):
+            return "appendix"
+        return "other"
 
     def _extract_section_heading_and_type(self, text: str) -> Tuple[str, str]:
         """Extract section heading and type from document text. Only returns actual headings found in source."""
         if not text:
             return "", "other"
-        cleaned = re.sub(r"\s+", " ", text).strip()
-        lower = cleaned.lower()
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         
-        # Pattern 1: PAGE markers with section names (e.g., "PAGE 1 — COVER / COMPANY OVERVIEW")
-        page_marker = re.search(r"PAGE\s+\d+\s*(?:[—–-])\s*(.+?)(?:\s*$|\n)", cleaned, re.I)
-        if page_marker:
-            section_name = page_marker.group(1).strip()
-            section_name = re.sub(r"\s*[/|]\s*", " / ", section_name)
-            if section_name:
-                # Infer type from the section name
-                section_type = "other"
-                if re.search(r"cover|overview", section_name, re.I):
-                    section_type = "business"
-                elif re.search(r"balance sheet", section_name, re.I):
-                    section_type = "financial_statement"
-                elif re.search(r"income|earnings", section_name, re.I):
-                    section_type = "financial_statement"
-                elif re.search(r"cash flow", section_name, re.I):
-                    section_type = "financial_statement"
-                elif re.search(r"metric|highlight", section_name, re.I):
-                    section_type = "financial_statement"
-                return self._clean_section_heading(section_name), section_type
-        
-        # Pattern 2: Known section patterns with standardized titles
-        section_patterns = [
-            (r"management discussion and analysis|md&a", "Management Discussion and Analysis", "management_discussion"),
-            (r"business overview|our business|business\s*$|operations overview|company overview", "Business Overview", "business"),
-            (r"key financial (?:metrics|highlights|ratios)", "Financial Highlights", "financial_statement"),
-            (r"risk factors?|market risk|legal proceedings|cybersecurity risk|risks and uncertainties", "Risk Factors", "risk"),
-            (r"consolidated balance sheets?|balance sheets?", "Balance Sheets", "financial_statement"),
-            (r"consolidated statements? of (?:income|operations)|income statements?|statements? of earnings", "Income Statement", "financial_statement"),
-            (r"statements? of cash flows?|cash flow statements?", "Cash Flow Statement", "financial_statement"),
-            (r"statements? of shareholders'? equity|stockholders'? equity|equity statements?", "Shareholders' Equity", "financial_statement"),
-            (r"comprehensive financial metrics", "Financial Metrics", "financial_statement"),
-            (r"financial statements?", "Financial Statements", "financial_statement"),
-            (r"notes to (?:the\s+)?financial statements?|footnotes?", "Notes to Financial Statements", "notes"),
-            (r"dividends?", "Dividends", "financial_statement"),
-            (r"share repurchases?|stock repurchases?", "Share Repurchases", "financial_statement"),
-            (r"liquidity|capital resources|cash flow and liquidity", "Liquidity and Capital Resources", "management_discussion"),
-            (r"letter to shareholders?|shareholders' letter", "Letter to Shareholders", "cover"),
-            (r"corporate governance|governance structure", "Corporate Governance", "governance"),
-            (r"environmental,? social,? and governance|esg|sustainability", "Sustainability", "sustainability"),
-            (r"auditor(?:'s)? report|independent auditor|audit opinion", "Auditor's Report", "financial_statement"),
-            (r"appendix|appendices|supplementary information", "Appendix", "appendix"),
-            (r"executive summary|summary of results", "Executive Summary", "summary"),
-        ]
-        for pattern, title, kind in section_patterns:
-            if re.search(pattern, lower, re.I):
-                return self._clean_section_heading(title), kind
-        
-        # Pattern 3: Fallback to detecting heading-like text from first few lines
-        heading_candidates = [line.strip() for line in text.splitlines() if line.strip()]
-        for line in heading_candidates[:8]:
-            candidate = self._clean_section_heading(line)
-            # Heuristic: headings are typically 2-12 words, capitalized, no ending punctuation,
-            # and don't look like data or sentences
-            if not candidate or len(candidate.split()) > 12 or len(candidate.split()) < 2:
-                continue
-            if re.search(r"[.!?]$", candidate):
-                continue
-            # Avoid common non-heading patterns
-            if re.search(r"^(\d+|[a-z]+\s+[a-z]+\s+[a-z]+|.*\b(?:million|billion|percent|%|[$€£₹])\b)", candidate, re.I):
-                continue
-            if re.search(r"[A-Z]", candidate):
-                return candidate, "other"
-        
-        # Pattern 4: No reliable heading found
+        # 1. Check each line for explicit section markers (e.g. PAGE 10 — DEBT AND LIQUIDITY, 01 FINANCIAL REVIEW)
+        for line in lines:
+            page_marker = re.match(r"^[Pp]AGE\s+\d+\s*[-—–:|]\s*(.+)$", line, re.I)
+            if page_marker:
+                raw_title = page_marker.group(1).strip()
+                cap_split = re.match(r"^([A-Z0-9\s/&,'\-+]{3,80}?)(?:\s+[A-Z][a-z].*|$)", raw_title)
+                if cap_split:
+                    raw_title = cap_split.group(1).strip()
+                if ":" in raw_title and len(raw_title.split(":")[0].split()) >= 2:
+                    raw_title = raw_title.split(":")[0].strip()
+                title = self._clean_section_heading(raw_title)
+                if title:
+                    return title, self._classify_section_type(title)
+
+            num_marker = re.match(r"^(?:0[1-9]|[1-9]\d?)\s*[\.\:\-]?\s+([A-Za-z0-9\s/&,'\-]{3,80})$", line)
+            if num_marker:
+                candidate = num_marker.group(1).strip()
+                if not re.search(r"^(?:million|billion|percent|%|[$€£₹])", candidate, re.I):
+                    title = self._clean_section_heading(candidate)
+                    if title and len(title.split()) <= 12:
+                        return title, self._classify_section_type(title)
+
+            sec_marker = re.match(r"^(?:ITEM|SECTION|PART)\s+[0-9A-Za-z]+[\.\:\-]?\s+([A-Za-z0-9\s/&,'\-]{3,80})$", line, re.I)
+            if sec_marker:
+                title = self._clean_section_heading(sec_marker.group(1))
+                if title:
+                    return title, self._classify_section_type(title)
+
+        # 2. Check first line as standalone heading
+        if lines:
+            first_line = lines[0]
+            cleaned_first = self._clean_section_heading(first_line)
+            if cleaned_first and 2 <= len(cleaned_first.split()) <= 12 and not re.search(r"[.!?]$", cleaned_first):
+                if not re.search(r"^(\d+|.*\b(?:million|billion|percent|%|[$€£₹])\b)", cleaned_first, re.I):
+                    sec_type = self._classify_section_type(cleaned_first)
+                    if sec_type != "other" or re.search(r"\b(?:overview|report|review|analysis|statements?|governance|performance|prospects|highlights|notes|summary|appendix|investments?|information|profile|outlook|commitments?)\b", cleaned_first, re.I):
+                        return cleaned_first, sec_type
+
+        return "", "other"
+
         return "", "other"
 
     def _window_chunk_text(self, index: int, chunks: List[Dict[str, Any]]) -> str:
@@ -1022,64 +1555,148 @@ class DocumentAgent:
         if not text:
             return ""
         normalized = self.clean_text(text)
-        # Only extract metrics that have an explicit value adjacent to them
-        metric_patterns = [
-            (r"\bRevenue\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Revenue"),
-            (r"\bOperating Income\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Operating Income"),
-            (r"\bNet Income\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Net Income"),
-            (r"\bTotal Assets\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Assets"),
-            (r"\b(?:Total )?Debt\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Debt"),
-            (r"\bOperating Cash Flow\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Operating Cash Flow"),
-            (r"\bFree Cash Flow\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Free Cash Flow"),
-            (r"\b(?:EPS|Earnings Per Share|Diluted EPS)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?%?)", "EPS"),
-            (r"\b(?:Total )?Equity\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Equity"),
-            (r"\bOperating Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Operating Margin"),
-            (r"\bCapital Expenditure\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*([-$]?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Capital Expenditure"),
-            (r"\b(?:R&D(?: Expense)?|Research and Development)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "R&D"),
-            (r"\bGross Profit\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Gross Profit"),
-            (r"\bGross Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Gross Margin"),
-            (r"\bNet Margin\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\d[\d.]*%)", "Net Margin"),
-            (r"\bTotal Liabilities\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+|\|)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Total Liabilities"),
-            (r"\b(?:Cash and Cash Equivalents|Cash)\b\s*(?:was|is|stood at|of|:|=|-|–|—|\s+)\s*(\$?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)", "Cash"),
+        monetary_val = r"(?P<val>[-$€£₹]\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|thousand|bn|m|b))?|\d[\d,]*(?:\.\d+)?\s*(?:million|billion|thousand|bn|m|b))"
+        any_val = r"(?P<val>[-$€£₹]?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|thousand|bn|m|b))?%?)"
+
+        metric_names = [
+            ("Revenue", r"(?:total )?revenues?|sales"),
+            ("Operating Income", r"operating income|operating profit|ebit"),
+            ("Net Income", r"net income|net earnings|net profit"),
+            ("Total Assets", r"total assets"),
+            ("Total Liabilities", r"total liabilities"),
+            ("Debt", r"(?:total )?debt|borrowings?"),
+            ("Operating Cash Flow", r"operating cash flow|cash flow from (?:operating activities|operations)"),
+            ("Free Cash Flow", r"free cash flow"),
+            ("EPS", r"(?:diluted )?earnings per share|eps|diluted eps"),
+            ("Total Equity", r"(?:total )?shareholders'? equity|stockholders'? equity|total equity"),
+            ("Operating Margin", r"operating margin"),
+            ("Capital Expenditure", r"capital expenditure|capex"),
+            ("R&D", r"(?:r\s*&\s*d|research and development)(?: expense)?"),
+            ("Gross Profit", r"gross profit"),
+            ("Gross Margin", r"gross margin"),
+            ("Net Margin", r"net margin"),
+            ("Cash", r"cash and cash equivalents|cash"),
         ]
-        metrics: List[str] = []
-        for pattern, name in metric_patterns:
-            for match in re.finditer(pattern, normalized, re.I):
-                value = match.group(1).strip() if match.lastindex else ""
-                if not value or value in {"-", ""}:
-                    continue
-                # Clean up the value
-                value = value.strip("() ") if value.strip("() ") else value
-                metrics.append(f"{name}: {value}")
-        
-        # Deduplicate while preserving order
-        seen: set[str] = set()
-        ordered: List[str] = []
-        for metric in metrics:
-            if metric not in seen:
-                ordered.append(metric)
-                seen.add(metric)
-        
-        # Also extract from table rows (metrics followed by numeric values separated by pipes or tabs)
+
+        metrics: list[str] = []
+        seen_names: set[str] = set()
+
+        for label, pattern in metric_names:
+            if label in seen_names:
+                continue
+            p1 = rf"\b(?:{pattern})\b[^\n.]{{0,60}}?\b(?:was|were|is|are|stood at|of|increased|grew|rose|fell|decreased|reached|totaled|totalled|amounted to|to|at|:|=|-|–|—)\s+(?:[-+]?\d[\d.]*%\s+(?:to|at)\s+)?{monetary_val}"
+            match = re.search(p1, normalized, re.I)
+            if not match:
+                p2 = rf"\b(?:{pattern})\b[^\n.]{{0,60}}?\b(?:was|were|is|are|stood at|of|increased|grew|rose|fell|decreased|reached|totaled|totalled|amounted to|to|at|:|=|-|–|—)\s+{any_val}"
+                match = re.search(p2, normalized, re.I)
+
+            if match:
+                val = match.group("val").strip("() ")
+                if re.search(r"\d", val) and not re.fullmatch(r"(?:19|20)\d{2}", val):
+                    metrics.append(f"{label}: {val}")
+                    seen_names.add(label)
+
         for line in normalized.splitlines():
-            # Skip lines that don't look like table rows (should have separators)
             if not re.search(r"[|\t]", line):
                 continue
-            # Look for metric names followed by a value in the line
-            metric_match = re.search(
-                r"\b(Revenue|Operating Income|Net Income|Total Assets|Total Debt|Debt|Operating Cash Flow|Free Cash Flow|EPS|Total Equity|Operating Margin|Capital Expenditure|R&D|Gross Profit|Gross Margin|Net Margin|Total Liabilities|Cash|Equity)\b[^|\t\n]*[|\t]+\s*(\$?-?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|b))?%?)",
-                line, re.I
-            )
-            if metric_match:
-                name = metric_match.group(1)
-                value = metric_match.group(2).strip()
-                if value and value not in {"-", ""}:
-                    metric = f"{name}: {value}"
-                    if metric not in seen:
-                        ordered.append(metric)
-                        seen.add(metric)
-        
-        return ", ".join(ordered)
+            for label, pattern in metric_names:
+                if label in seen_names:
+                    continue
+                table_match = re.search(
+                    rf"\b(?:{pattern})\b[^|\t\n]*[|\t]+\s*(?P<val>[-$€£₹]?\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|thousand|bn|m|b))?%?)",
+                    line, re.I
+                )
+                if table_match:
+                    val = table_match.group("val").strip("() ")
+                    if val and re.search(r"\d", val) and not re.fullmatch(r"(?:19|20)\d{2}", val):
+                        metrics.append(f"{label}: {val}")
+                        seen_names.add(label)
+
+        return ", ".join(metrics)
+
+    def _extract_financial_values(self, text: str) -> str:
+        if not text:
+            return ""
+        values = re.findall(
+            r"(?:[-$€£₹]\s*)?[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:million|billion|thousand|bn|m|b)?%?",
+            text,
+            re.I,
+        )
+        clean_vals = []
+        for v in values:
+            v_clean = v.strip()
+            if v_clean and re.search(r"\d", v_clean) and not re.fullmatch(r"(?:19|20)\d{2}", v_clean):
+                if any(c in v_clean for c in ("$", "€", "£", "₹", "%", "million", "billion", "bn", "m", "b")):
+                    clean_vals.append(v_clean)
+        return ", ".join(dict.fromkeys(clean_vals[:10]))
+
+    @staticmethod
+    def _generate_chunk_summary(
+        chunk: str,
+        section_title: str = "",
+        financial_metrics: str = "",
+        semantic_tags: str = "",
+        company_name: str = "",
+        report_year: str = "",
+    ) -> str:
+        if not chunk or not chunk.strip():
+            return ""
+        clean = re.sub(r"\s+", " ", chunk).strip()
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", clean) if s.strip() and len(s.split()) >= 4]
+
+        if financial_metrics:
+            prefix = f"{section_title}: " if section_title and section_title.lower() != "unknown" else ""
+            summary = f"{prefix}Reports {financial_metrics}."
+            if len(summary.split()) > 30:
+                summary = " ".join(summary.split()[:30]) + "..."
+            return summary
+
+        if sentences:
+            first_sent = sentences[0]
+            if len(first_sent.split()) <= 28:
+                return first_sent
+            return " ".join(first_sent.split()[:26]) + "..."
+
+        if section_title and section_title.lower() != "unknown":
+            return f"Discusses {section_title}."
+
+        if semantic_tags:
+            return f"Covers {semantic_tags.replace(',', ', ')}."
+
+        return " ".join(clean.split()[:20])
+
+    @staticmethod
+    def _compute_chunk_confidence(
+        doc: Dict[str, Any],
+        section_title: str,
+        financial_metrics: str,
+        semantic_tags: str,
+        chunk_type: str,
+        is_table: bool,
+        table_type: str,
+    ) -> float:
+        score = 0.0
+        if doc.get("company_name") and doc.get("company_name") != "Unknown":
+            score += 0.25
+        if doc.get("report_year") and doc.get("report_year") != "Unknown":
+            score += 0.20
+        if section_title and section_title.lower() not in {"unknown", ""}:
+            score += 0.25
+        if financial_metrics:
+            score += 0.15
+        elif semantic_tags:
+            score += 0.10
+        if (is_table and table_type) or (not is_table and not table_type):
+            score += 0.15
+        return round(min(1.0, score), 2)
+
+    def _extract_ticker(self, text: str, doc: Dict[str, Any]) -> str:
+        if not text:
+            return doc.get("company_ticker", "") or ""
+        match = re.search(r"\b(?:ticker|symbol|stock symbol|nyse|nasdaq|bse|nse|six)\s*[:\-]\s*([A-Z]{1,5})\b", text, re.I)
+        if match:
+            return match.group(1).upper()
+        return doc.get("company_ticker", "") or ""
 
     @staticmethod
     def _semantic_tag_mapping() -> dict[str, Tuple[str, ...]]:
@@ -1118,44 +1735,94 @@ class DocumentAgent:
 
     @staticmethod
     def _table_profile(text: str) -> Tuple[bool, bool, str, int, int]:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if not lines:
+        clean_text = text.replace("\u200b", "").replace("\ufeff", "").replace("\r", "")
+        lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+        if not lines or len(lines) < 2:
             return False, False, "", 0, 0
-        number_pattern = r"(?:\(?[-$€£₹]?\d[\d,]*(?:\.\d+)?%?\)?|\b(?:19|20)\d{2}\b)"
-        numeric_lines = [line for line in lines if re.search(number_pattern, line)]
-        year_lines = [line for line in lines if len(re.findall(r"\b(?:19|20)\d{2}\b", line)) >= 2]
-        separated_lines = [line for line in lines if "\t" in line or "|" in line or len(re.split(r"\s{2,}", line)) >= 3]
-        dense_numeric_lines = [line for line in lines if len(re.findall(number_pattern, line)) >= 2]
-        metric_re = r"\b(?:revenue|sales|income|earnings|assets|liabilities|equity|cash flow|cash and cash equivalents|debt|dividend|repurchase|shares|expense|gross margin|operating margin|net income|operating income|cost of revenue|accounts receivable|inventory)\b"
-        financial_lines = [line for line in lines if re.search(metric_re, line, re.I)]
-        table = (
-            len(separated_lines) >= 2
-            or len(dense_numeric_lines) >= 3
-            or (len(numeric_lines) >= 4 and bool(year_lines))
-            or (len(financial_lines) >= 2 and len(numeric_lines) >= 3)
-        )
-        financial_table = table and (len(financial_lines) >= 1 or bool(year_lines and dense_numeric_lines))
-        columns = max((len(re.split(r"\s{2,}|\|", line)) for line in lines), default=0)
-        if table and columns <= 1 and len(lines) >= 4:
-            columns = max(columns, min(3, max(len(line.split()) for line in lines) // 2))
-        lowered = text.lower()
-        if re.search(r"balance sheets?|assets|liabilities", lowered):
-            table_type = "Balance Sheet"
-        elif re.search(r"cash flows?|operating activities|financing activities|investing activities", lowered):
-            table_type = "Cash Flow"
-        elif re.search(r"income|operations|earnings|revenue|sales", lowered):
-            table_type = "Income Statement"
-        elif re.search(r"dividend", lowered):
-            table_type = "Dividend Table"
-        elif re.search(r"repurchase", lowered):
-            table_type = "Share Repurchases"
-        elif re.search(r"segment", lowered):
+
+        number_pattern = r"(?:\(?[-+$€£₹]?\d[\d,]*(?:\.\d+)?%?\)?|\b(?:19|20)\d{2}\b)"
+        sentence_words = r"\b(?:was|were|is|are|has|have|had|increased|decreased|grew|fell|dropped|totaled|totalled|reached|spending|spent|driven by|compared with|compared to|due to|reflects|aim to|aims to|because|which|that|we also|for the year ended|as of|period ended|in the year|during the)\b"
+        header_date_pattern = r"^(?:annual report|financial report|for the year ended|report period|fiscal year|ended)\b"
+
+        table_lines = []
+
+        for line in lines:
+            # Ignore document titles and narrative sentences with verbs
+            if re.search(header_date_pattern, line, re.I):
+                continue
+            if re.search(sentence_words, line, re.I):
+                continue
+
+            # 1. Delimited lines (pipes, tabs, multi-spaces >= 2)
+            if "|" in line or "\t" in line or len(re.split(r"\s{2,}", line)) >= 3:
+                cols = [c.strip() for c in re.split(r"\s{2,}|[\t|]", line) if c.strip()]
+                if len(cols) >= 2 and any(re.search(number_pattern, c) for c in cols):
+                    table_lines.append(line)
+                    continue
+
+            # 2. Tabular row without explicit multi-spaces: Label followed by 2 or more standalone numbers
+            nums_in_line = re.findall(number_pattern, line)
+            if len(nums_in_line) >= 2:
+                words = line.split()
+                if not re.search(r"[.!?]$", line) and (len(nums_in_line) >= 3 or (len(nums_in_line) == 2 and len(words) <= 7)):
+                    table_lines.append(line)
+                    continue
+
+            # 3. Schedule rows (e.g. '2026 1,200', 'Senior Notes 1,500')
+            if len(nums_in_line) == 1 and len(line.split()) <= 4 and not re.search(r"[.!?]$", line):
+                if re.match(r"^(?:20\d\d|[A-Z][a-zA-Z\s/&-]+)\s+[-+$€£₹]?\d[\d,]*(?:\.\d+)?%?$", line):
+                    table_lines.append(line)
+                    continue
+
+        has_table_title = bool(re.search(r"\b(?:table\s+[A-Za-z0-9]|key financial highlights|segment performance summary|debt maturity schedule|working capital components|detailed debt schedule|research and development investments|critical accounting estimates|commitments and contingencies|esg financial metric)\b", clean_text, re.I))
+
+        is_table = len(table_lines) >= 2 or (has_table_title and len(table_lines) >= 1)
+
+        if not is_table:
+            return False, False, "", 0, 0
+
+        full_text_lower = clean_text.lower()
+        
+        financial_keywords = r"\b(?:revenue|sales|income|earnings|ebitda|assets|liabilities|equity|cash|debt|dividend|shares|expense|margin|cost|receivable|inventory|payable|borrowings|retained earnings|working capital|r&d|capex|usd|eur|chf|inr|[$€£₹]|\(\$m\)|in millions|amount due|per share|tax|interest rate|maturities|headcount|growth)\b"
+        is_financial = bool(re.search(financial_keywords, clean_text, re.I))
+
+        # Classify table_type based on specific tables present in chunk
+        table_type = ""
+        if re.search(r"\b(?:table [a-z0-9]:\s*)?revenue by (?:business )?segment\b|\bsegment performance summary\b|\bsegment (?:revenue|breakdown)\b", full_text_lower):
             table_type = "Segment Revenue"
-        elif re.search(r"geographic|country|region", lowered):
-            table_type = "Geographic Revenue"
+        elif re.search(r"\b(?:table [a-z0-9]:\s*)?working capital components\b|\bnet working capital\b", full_text_lower):
+            table_type = "Working Capital"
+        elif re.search(r"\b(?:table [a-z0-9]:\s*)?(?:detailed )?debt schedule\b|\bdebt maturity schedule\b|\bdebt profile and liquidity\b", full_text_lower):
+            table_type = "Debt Schedule"
+        elif re.search(r"\br&d (?:expenditure|investments?)\b|\bresearch and development investments?\b", full_text_lower):
+            table_type = "R&D Investments"
+        elif re.search(r"\besg financial metric\b|\bsustainability-linked revenue\b|\b(?:sustainability|esg)\b.*\bghg\b", full_text_lower):
+            table_type = "Sustainability Metrics"
+        elif re.search(r"\bcommitments and contingencies\b|\bpurchase commitments\b.*\bperformance guarantees\b", full_text_lower):
+            table_type = "Commitments & Contingencies"
+        elif re.search(r"\bcritical accounting estimates\b|\bestimate area\b", full_text_lower):
+            table_type = "Accounting Estimates"
+        elif re.search(r"\b(?:statements? of )?cash flows?\b|\bnet cash from operating activities\b|\bfree cash flow\b", full_text_lower) and re.search(r"\bcash flows?\b", full_text_lower):
+            table_type = "Cash Flow"
+        elif re.search(r"\bbalance sheets?\b|\btotal assets\b.*\btotal liabilities\b", full_text_lower, re.S) and re.search(r"\bbalance sheets?\b", full_text_lower):
+            table_type = "Balance Sheet"
+        elif re.search(r"\b(?:statements? of )?(?:income|operations|earnings)\b|\bincome statements?\b|\bkey financial highlights\b|\bgross profit\b|\boperating income\b.*\bnet income\b", full_text_lower, re.S):
+            table_type = "Income Statement"
+        elif re.search(r"\bgeographic\b.*\b(?:revenue|sales|breakdown|region)\b|\brevenue by (?:geographic )?region\b", full_text_lower, re.S):
+            table_type = "Geographic Breakdown"
+        elif re.search(r"\b(?:employees?|headcount|workforce|fte)\b", full_text_lower):
+            table_type = "Employee Table"
+        elif re.search(r"\bdividends?\b", full_text_lower):
+            table_type = "Dividend Table"
+        elif re.search(r"\b(?:share|stock) repurchases?\b", full_text_lower):
+            table_type = "Share Repurchases"
+        elif is_financial:
+            table_type = "Financial Table"
         else:
-            table_type = "Financial Table" if financial_table else ("Table" if table else "")
-        return table, financial_table, table_type, len(lines) if table else 0, columns if table else 0
+            table_type = "Table"
+
+        columns = max((len(line.split()) for line in table_lines), default=2)
+        return True, is_financial, table_type, len(table_lines), columns
 
     @staticmethod
     def _contains_chart(text: str) -> bool:
@@ -1180,47 +1847,83 @@ class DocumentAgent:
         report_year: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         doc = self._document_metadata(path, full_text, pages)
-        document_id = document_id or str(uuid.uuid5(uuid.NAMESPACE_URL, doc_hash))
+        document_id = document_id or str(uuid.uuid5(uuid.NAMESPACE_URL, f"{path.name}:{doc_hash}"))
         if company_name:
             doc["company_name"] = company_name
         if report_year:
             doc["report_year"] = str(report_year)
             doc["financial_year"] = str(report_year)
-        result = []
+
+        result: List[Dict[str, Any]] = []
         timestamp = datetime.now(timezone.utc).isoformat()
+        current_section_title = ""
+        current_section_type = "other"
+
         for index, chunk_record in enumerate(chunks):
             chunk = chunk_record["text"]
-            section_title = chunk_record.get("section_title", "") or "Unknown"
-            section_type = chunk_record.get("section_type", "other") or "other"
+            block_sec_title = chunk_record.get("section_title", "") or ""
+            block_sec_type = chunk_record.get("section_type", "other") or "other"
+
+            # Check if this chunk itself contains a new section heading
+            chunk_heading, chunk_heading_type = self._extract_section_heading_and_type(chunk)
+            if chunk_heading:
+                current_section_title = chunk_heading
+                current_section_type = chunk_heading_type
+            elif block_sec_title and block_sec_title.lower() not in {"unknown", "none", "null", "other"}:
+                current_section_title = block_sec_title
+                current_section_type = block_sec_type
+
+            section_title = current_section_title
+            section_type = current_section_type if section_title else self._classify_section_type(chunk)
+
             table, financial_table, table_type, table_rows, table_columns = self._table_profile(chunk)
             if not table:
-                table = "table" in chunk_record.get("block_types", [])
+                table = False
+                financial_table = False
+                table_type = ""
+                table_rows = 0
+                table_columns = 0
+
             window_text = self._window_chunk_text(index, chunks)
-            if table:
-                surrounding_text = f"{chunk}\n\n{window_text}" if window_text else chunk
-            else:
-                surrounding_text = window_text or chunk
-            values = re.findall(
-                r"\b(?:revenue|operating income|gross profit|gross margin|ebitda|ebit|cash flow|free cash flow|eps|diluted eps|capex|r&d|research and development|share repurchases?|dividend|tax expense|net income|working capital|debt|equity|inventory|accounts receivable|accounts payable|goodwill|intangible assets|segment revenue|operating margin|return on equity|return on assets|liquidity|leverage|growth rate|growth|assets|liabilities)\b[^\n]{0,45}?(?:[-−(]?[$€£₹]?[\d,.]+(?:\s*(?:million|billion|bn|m|b))?%?[)]?)",
-                surrounding_text,
-                re.I,
-            )
-            page_numbers = chunk_record["page_numbers"]
+            surrounding_text = f"{chunk}\n\n{window_text}" if (table and window_text) else (window_text or chunk)
+            
+            page_numbers = chunk_record.get("page_numbers", [1])
             organizations = self._named_values(surrounding_text, ("companies", "organizations", "partners", "customer", "customers"))
             products = self._named_values(surrounding_text, ("products", "services", "platforms", "offerings"))
             business_segments = self._named_values(surrounding_text, ("segments", "business segments", "operating segments"))
-            confidence = round(sum(value not in ("", "Unknown", None) for value in (doc["company_name"], doc["report_year"], section_title, values)) / 4, 2)
+            
             sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", chunk) if sentence.strip()]
             paragraphs = [paragraph for paragraph in re.split(r"\n\s*\n", chunk) if paragraph.strip()]
-            chunk_type = "financial_table" if financial_table else ("risk" if section_type == "risk" else ("md&a" if section_type == "management_discussion" else section_type if section_type in {"notes", "governance", "sustainability", "appendix", "chart", "business", "cover", "financial_statement"} else "narrative"))
+            chunk_type = "financial_table" if financial_table else ("table" if table else ("risk" if section_type == "risk" else ("md&a" if section_type == "management_discussion" else section_type if section_type in {"notes", "governance", "sustainability", "appendix", "cover", "financial_statement"} else "narrative")))
             semantic_tags = self._extract_semantic_tags(chunk)
             financial_metrics = self._extract_financial_metrics(chunk)
-            chunk_summary = f"Discusses {financial_metrics.lower()}." if financial_metrics else (f"Discusses {section_title.lower()}." if section_title != "Unknown" else "Contains report information.")
-            chunk_summary = " ".join(chunk_summary.split()[:25])
+            financial_values = self._extract_financial_values(chunk)
+            
+            chunk_summary = self._generate_chunk_summary(
+                chunk=chunk,
+                section_title=section_title,
+                financial_metrics=financial_metrics,
+                semantic_tags=semantic_tags,
+                company_name=doc.get("company_name", ""),
+                report_year=doc.get("report_year", ""),
+            )
+            
+            confidence = self._compute_chunk_confidence(
+                doc=doc,
+                section_title=section_title,
+                financial_metrics=financial_metrics,
+                semantic_tags=semantic_tags,
+                chunk_type=chunk_type,
+                is_table=bool(table),
+                table_type=table_type,
+            )
+            
             page_start = min(page_numbers) if page_numbers else 0
             page_end = max(page_numbers) if page_numbers else 0
             page_number = str(page_start) if page_start == page_end else f"{page_start}-{page_end}"
             is_chart = self._contains_chart(chunk)
+            company_ticker = self._extract_ticker(chunk, doc)
+
             metadata: Dict[str, Any] = {
                 "analysis_id": analysis_id,
                 "document_id": document_id,
@@ -1263,7 +1966,7 @@ class DocumentAgent:
                 "chunk_summary": chunk_summary[:240],
                 "industry": doc["industry"],
                 "company_name": company_name or doc["company_name"],
-                "company_ticker": (re.search(r"\b(?:ticker|symbol)\s*[:\-]\s*([A-Z]{1,5})\b", chunk) or ["", ""])[1],
+                "company_ticker": company_ticker,
                 "confidence_score": confidence,
                 "semantic_tags": semantic_tags,
                 "organizations": organizations,
@@ -1272,7 +1975,7 @@ class DocumentAgent:
                 "countries": self._extract_countries(surrounding_text),
                 "financial_metrics": financial_metrics,
                 "financial_entities": financial_metrics,
-                "financial_values": self._csv(values),
+                "financial_values": financial_values,
                 "business_segments": business_segments,
                 "investment_keywords": self._matches(surrounding_text, ("investment", "capital expenditure", "share buyback", "share repurchase", "dividend", "guidance")),
                 "risks": self._matches(surrounding_text, ("cybersecurity", "competition", "regulation", "inflation", "interest rates", "supply chain", "litigation")),
@@ -1290,7 +1993,21 @@ class DocumentAgent:
                 "ingestion_timestamp": timestamp,
             }
             result.append(metadata)
+
+        # Call targeted Qwen enrichment for any chunks with missing metadata / low confidence
+        if getattr(self.config, "enable_llm_metadata_fallback", True):
+            doc_context = {
+                "company_name": doc.get("company_name", ""),
+                "report_year": doc.get("report_year", ""),
+                "report_type": doc.get("report_type", ""),
+                "report_title": doc.get("report_title", ""),
+                "source_file": path.name,
+                "company_ticker": doc.get("company_ticker", ""),
+            }
+            self._enrich_chunks_with_qwen(chunks, result, doc_context)
+
         return result
+
 
     @staticmethod
     def validate_metadata(metadatas: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1487,7 +2204,7 @@ class DocumentAgent:
         try:
             doc_hash = self.generate_document_hash(path)
             allow_replace = force_reingest or bool(company_name or report_year or document_id)
-            if not allow_replace and self.document_exists(doc_hash):
+            if not allow_replace and self.document_exists(doc_hash, analysis_id=current_analysis):
                 message = "Document already exists. Skipping ingestion."
                 logger.info("%s source=%s doc_hash=%s", message, path.name, doc_hash)
                 return IngestionResult("success", path.name, current_analysis, 0, time.time() - started, self.config.collection_name, True, message=message).to_dict()
@@ -1589,11 +2306,14 @@ class DocumentAgent:
                     if isinstance(metadata, dict) and "source" in metadata:
                         sources.add(metadata["source"])
             
+            metas = results.get("metadatas", []) or []
             return {
                 "analysis_id": analysis_id,
                 "documents": sorted(list(sources)),
                 "total_documents": len(sources),
-                "total_chunks": len(results.get("ids", []))
+                "total_chunks": len(metas),
+                "metadatas": metas,
+                "metadata": metas,
             }
         except Exception as exc:
             logger.error("Error retrieving documents for analysis %s: %s", analysis_id, exc)

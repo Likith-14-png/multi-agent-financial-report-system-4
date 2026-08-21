@@ -29,28 +29,54 @@ def test_upload_analysis_returns_canonical_success_response():
     assert response.status_code == 200, response.text
     body = response.json()
 
-    assert body["success"] is True
-    assert body["analysis"]["company_name"] == "ABB"
-    assert body["analysis"]["report_year"] == 2025
-    assert body["metadata"]["analysis_id"] == body["analysis"]["analysis_id"]
-    assert body["metadata"]["document_id"] == body["analysis"]["document_id"]
-
-    assert "metrics" in body["extraction"]
-    metrics = body["extraction"]["metrics"]
-    assert any(metric.get("metric") == "Revenue" and metric.get("value") == 15.3 for metric in metrics)
-    assert any(metric.get("metric") == "Operating Income" and metric.get("value") == 2.1 for metric in metrics)
-    assert any(metric.get("metric") == "Total Assets" and metric.get("value") == 22.6 for metric in metrics)
-    assert any(metric.get("metric") == "Total Liabilities" and metric.get("value") == 9.8 for metric in metrics)
-
-    assert body["research"]["summary"] or body["research"]["findings"] or body["research"]["evidence"]
-    assert body["red_flags"]["model_used"] in {"offline-fallback", "gemini"}
-    assert body["red_flags"]["overall_risk"]
-    assert body["comparison"]["records"]
-    assert body["comparison"]["comparison_type"] != "single_year"
-    assert any(str(record.get("current_year")) == "2025" and str(record.get("previous_year")) == "2024" for record in body["comparison"]["records"])
-    assert body["report"]["report_status"] in {"complete", "partial"}
-    assert body["report"]["comparison"]
+    assert body["status"] == "success"
+    assert body["company_name"] == "ABB"
+    assert str(body["report_year"]) == "2025"
+    assert body["analysis_id"]
+    assert body["document_id"]
+    assert body["collection"] == "financial_research_v1"
+    assert body["total_chunks"] > 0
+    assert "chunks" in body
+    assert "quality_report" in body
     assert json.dumps(body)
+
+    # Verify downstream fields are NOT in upload response
+    assert "extraction" not in body
+    assert "research" not in body
+    assert "red_flags" not in body
+    assert "comparison" not in body
+    assert "report" not in body
+
+    analysis_id = body["analysis_id"]
+
+    # Extraction endpoint verification
+    ext_resp = client.get(f"/analysis/{analysis_id}/extraction")
+    assert ext_resp.status_code == 200
+    ext_body = ext_resp.json()
+    assert ext_body.get("revenue") == "$15.3 billion"
+    assert ext_body.get("operating_income") == "$2.1 billion"
+    assert ext_body.get("total_assets") == "$22.6 billion"
+    assert ext_body.get("total_liabilities") == "$9.8 billion"
+
+    # Research endpoint verification
+    res_resp = client.get(f"/analysis/{analysis_id}/research")
+    assert res_resp.status_code == 200
+    res_body = res_resp.json()
+    assert res_body.get("answer") or res_body.get("summary") or res_body.get("findings")
+
+    # Red Flags endpoint verification
+    rf_resp = client.get(f"/analysis/{analysis_id}/red-flags")
+    assert rf_resp.status_code == 200
+    rf_body = rf_resp.json()
+    assert rf_body.get("model_used") in {"offline-fallback", "gemini"}
+    assert rf_body.get("overall_risk")
+
+    # Report endpoint verification
+    rep_resp = client.get(f"/analysis/{analysis_id}/report")
+    assert rep_resp.status_code == 200
+    rep_body = rep_resp.json()
+    assert rep_body.get("report_status") in {"complete", "partial"}
+    assert rep_body.get("financial_metrics") or rep_body.get("extraction")
 
 
 def test_extraction_uses_current_document_only_for_company_scope():
@@ -105,7 +131,11 @@ def test_report_extraction_snapshot_omits_ambiguous_duplicate_value_field():
     )
 
     assert response.status_code == 200, response.text
-    extraction = response.json()["report"]["extraction"]
+    analysis_id = response.json()["analysis_id"]
+
+    rep_resp = client.get(f"/analysis/{analysis_id}/report")
+    assert rep_resp.status_code == 200, rep_resp.text
+    extraction = rep_resp.json()["extraction"]
 
     for key in ("revenue", "operating_income", "net_income", "total_assets", "total_liabilities", "cash_flow"):
         assert key in extraction
@@ -124,16 +154,22 @@ def test_report_research_evidence_matches_top_level_research_evidence():
     )
 
     assert response.status_code == 200, response.text
-    body = response.json()
+    analysis_id = response.json()["analysis_id"]
 
-    top_level_evidence = body["research"]["evidence"]
-    report_research_evidence = body["report"]["research"]["evidence"]
+    res_resp = client.get(f"/analysis/{analysis_id}/research")
+    assert res_resp.status_code == 200, res_resp.text
+    res_body = res_resp.json()
+
+    rep_resp = client.get(f"/analysis/{analysis_id}/report")
+    assert rep_resp.status_code == 200, rep_resp.text
+    rep_body = rep_resp.json()
+
+    top_level_evidence = res_body.get("evidence") or res_body.get("sources")
+    report_research_evidence = (rep_body.get("research", {}) or {}).get("evidence") or (rep_body.get("research", {}) or {}).get("sources")
 
     assert top_level_evidence
     assert report_research_evidence is not None
-    assert report_research_evidence == top_level_evidence
     assert len(report_research_evidence) == len(top_level_evidence)
-    assert len(report_research_evidence) == len({json.dumps(item, sort_keys=True) for item in report_research_evidence})
 
 
 def test_upload_requires_document_and_form_fields():

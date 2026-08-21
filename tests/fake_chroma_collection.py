@@ -49,7 +49,15 @@ class FakeChromaCollection:
         self._metas: List[Dict[str, Any]] = []
 
     def add_document(self, path: str, company: str, doc_type: str, period: str = ""):
-        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+        p = Path(path)
+        if not p.is_file():
+            root_cand = Path(__file__).resolve().parent.parent / p.name
+            data_cand = Path(__file__).resolve().parent.parent / "data" / p.name
+            if root_cand.is_file():
+                p = root_cand
+            elif data_cand.is_file():
+                p = data_cand
+        text = p.read_text(encoding="utf-8", errors="ignore")
         text = re.sub(r"\s+", " ", text).strip()
         doc_id = str(uuid.uuid4())[:8]
         for idx, chunk in enumerate(_chunk_text(text)):

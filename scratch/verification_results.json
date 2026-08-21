@@ -1,0 +1,32 @@
+{
+  "ABB Report 2025": {
+    "total_chunks": 0,
+    "company_name": "",
+    "report_year": "",
+    "report_type": "",
+    "table_inconsistencies": 0,
+    "unknown_titles": 0,
+    "generic_summaries": 0,
+    "sample_chunk_0": {}
+  },
+  "Infosys Report 2025": {
+    "total_chunks": 0,
+    "company_name": "",
+    "report_year": "",
+    "report_type": "",
+    "table_inconsistencies": 0,
+    "unknown_titles": 0,
+    "generic_summaries": 0,
+    "sample_chunk_0": {}
+  },
+  "Microsoft 2024 Annual Report": {
+    "total_chunks": 0,
+    "company_name": "",
+    "report_year": "",
+    "report_type": "",
+    "table_inconsistencies": 0,
+    "unknown_titles": 0,
+    "generic_summaries": 0,
+    "sample_chunk_0": {}
+  }
+}
