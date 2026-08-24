@@ -140,7 +140,13 @@ def _parse_numeric_value(value: Any) -> Tuple[Optional[float], Optional[str]]:
 
     lower = text.lower().replace(" ", "")
     unit = "unitless"
-    if "billion" in lower:
+    if "crore" in lower or "cr" in lower:
+        unit = "crore"
+        lower = lower.replace("crores", "").replace("crore", "").replace("crs", "").replace("cr", "")
+    elif "lakh" in lower or "lac" in lower:
+        unit = "lakh"
+        lower = lower.replace("lakhs", "").replace("lakh", "").replace("lacs", "").replace("lac", "")
+    elif "billion" in lower:
         unit = "billion"
         lower = lower.replace("billion", "")
     elif "million" in lower:
@@ -159,7 +165,7 @@ def _parse_numeric_value(value: Any) -> Tuple[Optional[float], Optional[str]]:
         unit = "thousand"
         lower = lower[:-1]
 
-    cleaned = lower.replace("$", "").replace("€", "").replace("£", "").replace(",", "")
+    cleaned = lower.replace("₹", "").replace("rs.", "").replace("rs", "").replace("inr", "").replace("$", "").replace("€", "").replace("£", "").replace(",", "")
     match = re.search(r"[-+]?\d*\.?\d+(?:e[-+]?\d+)?", cleaned)
     if not match:
         return None, None
@@ -170,12 +176,14 @@ def _parse_numeric_value(value: Any) -> Tuple[Optional[float], Optional[str]]:
 def _convert_to_unit(value: float, source_unit: Optional[str], target_unit: str) -> float:
     if value is None:
         return value
-    if source_unit in (None, "unitless") or target_unit in (None, "unitless"):
+    if source_unit in (None, "unitless") or target_unit in (None, "unitless") or source_unit == target_unit:
         return value
     conversion_map = {
         "thousand": {"thousand": 1.0, "million": 1_000.0, "billion": 1_000_000.0},
         "million": {"thousand": 1.0 / 1_000.0, "million": 1.0, "billion": 1.0 / 1_000.0},
         "billion": {"thousand": 1.0 / 1_000_000.0, "million": 1.0 / 1_000.0, "billion": 1.0},
+        "crore": {"crore": 1.0, "lakh": 100.0},
+        "lakh": {"crore": 0.01, "lakh": 1.0},
     }
     factor = conversion_map.get(source_unit, {}).get(target_unit)
     if factor is None:
@@ -512,8 +520,11 @@ def _serialize_record(metric_name: str, current_year: Any, current_value: Any, u
 
 def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any], metric_name: Optional[str] = None) -> Dict[str, Any]:
     metric_label = metric_name or company_a.get("metric") or company_b.get("metric") or "Revenue"
-    a_value, a_unit = _parse_numeric_value(company_a.get("value") or company_a.get("current_value") or company_a.get("amount"))
-    b_value, b_unit = _parse_numeric_value(company_b.get("value") or company_b.get("current_value") or company_b.get("amount"))
+    m_key = metric_label.lower().replace(" ", "_")
+    a_raw = company_a.get("value") or company_a.get("current_value") or company_a.get("amount") or company_a.get(m_key) or company_a.get(metric_label)
+    b_raw = company_b.get("value") or company_b.get("current_value") or company_b.get("amount") or company_b.get(m_key) or company_b.get(metric_label)
+    a_value, a_unit = _parse_numeric_value(a_raw)
+    b_value, b_unit = _parse_numeric_value(b_raw)
     if a_value is None or b_value is None:
         return {
             "metric": metric_label,

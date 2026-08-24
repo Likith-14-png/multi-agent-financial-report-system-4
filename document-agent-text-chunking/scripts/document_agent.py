@@ -1163,8 +1163,10 @@ class DocumentAgent:
             candidate = re.sub(r"^\s*(?:page\s*)?\d{1,4}\s+", "", candidate, flags=re.I)
             candidate = re.sub(r"^(?:the\s+)?(?:company|issuer|registrant|issuer name|registrant name|company name)\s*[:\-]\s*", "", candidate, flags=re.I)
             candidate = re.sub(r"\s+(?:annual|quarterly|sustainability|esg|proxy|integrated|report|statement|letter|results|update|presentation|shareholder|notice|form)(?:\s+(?:report|statement|letter|results|update|presentation|shareholder|notice|form))*\s*(?:\b(?:19|20)\d{2}\b)?$", "", candidate, re.I)
-            candidate = re.sub(r"\s+\b(?:19|20)\d{2}\b$", "", candidate, re.I)
-            candidate = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9.]+$", "", candidate)
+            if candidate.endswith(")") and "(" in candidate and candidate.count("(") == candidate.count(")"):
+                candidate = re.sub(r"^[^A-Za-z0-9(]+|[^A-Za-z0-9.)]+$", "", candidate)
+            else:
+                candidate = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9.]+$", "", candidate)
             return candidate.strip()
 
         def _is_company_candidate(value: str, source: str = "", line: str = "", occurrences: int = 1) -> bool:

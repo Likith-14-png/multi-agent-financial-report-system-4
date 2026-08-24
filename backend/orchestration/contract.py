@@ -253,8 +253,10 @@ class ExtractionResponse(BaseModel):
     operating_cash_flow: Optional[Any] = None
     free_cash_flow: Optional[Any] = None
     rd_expense: Optional[Any] = None
-    total_debt: Optional[Any] = None
     eps: Optional[Any] = None
+    basic_eps: Optional[Any] = None
+    diluted_eps: Optional[Any] = None
+    trend_eps: Optional[Any] = None
     yearly_metrics: Optional[Dict[str, Any]] = None
     income_statement: Optional[Dict[str, Any]] = None
     balance_sheet: Optional[Dict[str, Any]] = None
@@ -263,6 +265,7 @@ class ExtractionResponse(BaseModel):
     accounting_information: Optional[List[Dict[str, Any]]] = None
     risk_related_metrics: Optional[List[Dict[str, Any]]] = None
     detailed_metrics: Optional[List[Dict[str, Any]]] = None
+    observations: Optional[List[Dict[str, Any]]] = None
     traceability: Optional[Dict[str, Any]] = None
     source_chunks: Optional[List[str]] = None
     source_file: Optional[str] = None

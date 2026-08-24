@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Agent Financial Research System - Architecture Flow</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 28px;
+      color: #38bdf8;
+    }
+    .header p {
+      margin: 8px 0 0 0;
+      color: #94a3b8;
+      font-size: 14px;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .btn {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #ffffff;
+      padding: 10px 20px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+      transition: all 0.2s ease;
+      cursor: pointer;
+      border: none;
+    }
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(37, 99, 235, 0.4);
+    }
+    .btn-secondary {
+      background: #334155;
+      color: #e2e8f0;
+      box-shadow: none;
+    }
+    .btn-secondary:hover {
+      background: #475569;
+    }
+    .canvas-container {
+      width: 100%;
+      max-width: 1400px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Multi-Agent Financial Research System</h1>
+    <p>Complete Backend Flow &amp; Architectural Blueprint</p>
+  </div>
+
+  <div class="actions">
+    <a href="backend_pipeline_flow.svg" download="backend_pipeline_flow.svg" class="btn">📥 Download Standalone SVG Vector Diagram</a>
+    <button class="btn btn-secondary" onclick="window.print()">🖨️ Print / Save as PDF</button>
+  </div>
+
+  <div class="canvas-container">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1200" width="100%" height="100%" style="background:#0f172a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0e7490"/>
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+    <linearGradient id="roseGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e"/>
+      <stop offset="100%" stop-color="#be123c"/>
+    </linearGradient>
+    <linearGradient id="cardBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+
+    <!-- Shadow -->
+    <filter id="dropShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="6" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+
+    <!-- Arrow Marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#c084fc"/>
+    </marker>
+  </defs>
+
+  <!-- Title & Header -->
+  <g transform="translate(80, 50)">
+    <text x="720" y="30" font-size="34" font-weight="800" fill="#f8fafc" text-anchor="middle" letter-spacing="1">MULTI-AGENT FINANCIAL RESEARCH SYSTEM</text>
+    <text x="720" y="65" font-size="18" font-weight="400" fill="#94a3b8" text-anchor="middle">End-to-End Backend Architecture, Retrieval Gatekeeper &amp; Specialized Agent Orchestration</text>
+  </g>
+
+  <!-- ==================== STAGE 1: CLIENT & API LAYER ==================== -->
+  <g transform="translate(80, 140)">
+    <!-- Container Box -->
+    <rect width="1440" height="150" rx="16" fill="url(#cardBg)" stroke="#334155" stroke-width="2" filter="url(#dropShadow)"/>
+    <rect x="0" y="0" width="1440" height="6" rx="3" fill="url(#primaryGrad)"/>
+    <text x="30" y="36" font-size="16" font-weight="700" fill="#38bdf8" letter-spacing="1.5">STAGE 1: INGRESS &amp; SESSION STATE</text>
+
+    <!-- User / Frontend Card -->
+    <g transform="translate(40, 55)">
+      <rect width="280" height="70" rx="10" fill="#1e293b" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="140" y="32" font-size="16" font-weight="700" fill="#f1f5f9" text-anchor="middle">👤 User / Web UI</text>
+      <text x="140" y="52" font-size="12" fill="#94a3b8" text-anchor="middle">Upload Report / Ask Financial Questions</text>
+    </g>
+
+    <!-- Arrow 1 -->
+    <path d="M 330 90 L 410 90" stroke="#38bdf8" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+    <text x="370" y="80" font-size="11" font-weight="600" fill="#38bdf8" text-anchor="middle">REST / JSON</text>
+
+    <!-- FastAPI Router Card -->
+    <g transform="translate(420, 55)">
+      <rect width="320" height="70" rx="10" fill="#1e293b" stroke="#06b6d4" stroke-width="1.5"/>
+      <text x="160" y="32" font-size="16" font-weight="700" fill="#f1f5f9" text-anchor="middle">⚡ FastAPI Router (backend/api.py)</text>
+      <text x="160" y="52" font-size="12" fill="#94a3b8" text-anchor="middle">Endpoints: /upload, /extraction, /research, /report</text>
+    </g>
+
+    <!-- Arrow 2 -->
+    <path d="M 750 90 L 830 90" stroke="#38bdf8" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+
+    <!-- Session Store & Workflow Card -->
+    <g transform="translate(840, 55)">
+      <rect width="550" height="70" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="275" y="32" font-size="16" font-weight="700" fill="#f1f5f9" text-anchor="middle">⚙️ AnalysisWorkflow &amp; SessionStore (workflow.py)</text>
+      <text x="275" y="52" font-size="12" fill="#c084fc" text-anchor="middle">Multi-Tenant Session Registry | analysis_id Tracking | Pipeline Orchestration</text>
+    </g>
+  </g>
+
+  <!-- Connect Stage 1 to Ingestion & Retrieval -->
+  <path d="M 400 290 L 400 340" stroke="#38bdf8" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <text x="415" y="320" font-size="12" font-weight="600" fill="#38bdf8">Ingest File</text>
+
+  <path d="M 1115 290 L 1115 340" stroke="#c084fc" stroke-width="3" fill="none" marker-end="url(#arrowPurple)"/>
+  <text x="1130" y="320" font-size="12" font-weight="600" fill="#c084fc">Trigger Pipeline</text>
+
+  <!-- ==================== STAGE 2: INGESTION & RETRIEVAL LAYER ==================== -->
+  <g transform="translate(80, 340)">
+    <!-- Container Box -->
+    <rect width="1440" height="230" rx="16" fill="url(#cardBg)" stroke="#334155" stroke-width="2" filter="url(#dropShadow)"/>
+    <rect x="0" y="0" width="1440" height="6" rx="3" fill="url(#tealGrad)"/>
+    <text x="30" y="36" font-size="16" font-weight="700" fill="#2dd4bf" letter-spacing="1.5">STAGE 2: VECTOR INGESTION &amp; EVIDENCE RETRIEVAL GATEKEEPER</text>
+
+    <!-- Document Agent Card -->
+    <g transform="translate(40, 60)">
+      <rect width="380" height="140" rx="10" fill="#0f172a" stroke="#0ea5e9" stroke-width="1.5"/>
+      <text x="190" y="32" font-size="16" font-weight="700" fill="#38bdf8" text-anchor="middle">📄 Document Agent (document_agent.py)</text>
+      <text x="20" y="60" font-size="12" fill="#cbd5e1">• PDF/Text Parsing &amp; Table/Chart Detection</text>
+      <text x="20" y="82" font-size="12" fill="#cbd5e1">• Contextual Sliding Chunking (800 token size)</text>
+      <text x="20" y="104" font-size="12" fill="#cbd5e1">• Metadata Tagging: company, year, section, pages</text>
+      <text x="20" y="126" font-size="12" fill="#38bdf8">• Model: sentence-transformers/all-MiniLM-L6-v2</text>
+    </g>
+
+    <!-- Arrow to ChromaDB -->
+    <path d="M 430 130 L 510 130" stroke="#38bdf8" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+
+    <!-- ChromaDB Vector Store -->
+    <g transform="translate(520, 60)">
+      <rect width="320" height="140" rx="10" fill="#0f172a" stroke="#eab308" stroke-width="2"/>
+      <text x="160" y="32" font-size="16" font-weight="700" fill="#facc15" text-anchor="middle">🗄️ ChromaDB Vector Store</text>
+      <text x="160" y="55" font-size="12" font-weight="600" fill="#fef08a" text-anchor="middle">Collection: financial_research_v1</text>
+      <text x="20" y="85" font-size="12" fill="#cbd5e1">• Dense Vector Embeddings (384-dim)</text>
+      <text x="20" y="107" font-size="12" fill="#cbd5e1">• Multi-Tenant Metadata: analysis_id</text>
+      <text x="20" y="129" font-size="12" fill="#facc15">• Strict Session &amp; Document ID Isolation</text>
+    </g>
+
+    <!-- Arrow ChromaDB <-> EvidenceRetrievalService -->
+    <path d="M 850 130 L 920 130" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+
+    <!-- Evidence Retrieval Service (The Gatekeeper) -->
+    <g transform="translate(930, 50)">
+      <rect width="470" height="160" rx="12" fill="#042f2e" stroke="#10b981" stroke-width="2.5"/>
+      <rect x="15" y="12" width="440" height="28" rx="6" fill="#065f46"/>
+      <text x="235" y="31" font-size="14" font-weight="800" fill="#a7f3d0" text-anchor="middle">🛡️ EVIDENCE RETRIEVAL SERVICE (THE GATEKEEPER)</text>
+      <text x="20" y="65" font-size="12" font-weight="600" fill="#34d399">The ONLY Retrieval Gateway between Agents &amp; ChromaDB</text>
+      <text x="20" y="87" font-size="12" fill="#f1f5f9">• Strict analysis_id &amp; Company Filtering (Zero Data Leakage)</text>
+      <text x="20" y="107" font-size="12" fill="#f1f5f9">• Dynamic Query Expansion based on Financial Intent</text>
+      <text x="20" y="127" font-size="12" fill="#f1f5f9">• Table of Contents &amp; Disclaimer Noise Rejection</text>
+      <text x="20" y="147" font-size="12" font-weight="600" fill="#6ee7b7">• Section Penalty Engine (+1.8 penalty on Balance Sheet for margins)</text>
+    </g>
+  </g>
+
+  <!-- Connect Evidence Retrieval Service to Specialized Agents -->
+  <path d="M 1165 570 L 1165 620" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+  <text x="1180" y="598" font-size="12" font-weight="600" fill="#34d399">Ranked Evidence Chunks</text>
+
+  <!-- ==================== STAGE 3: SPECIALIZED AGENT LAYER ==================== -->
+  <g transform="translate(80, 620)">
+    <!-- Container Box -->
+    <rect width="1440" height="260" rx="16" fill="url(#cardBg)" stroke="#334155" stroke-width="2" filter="url(#dropShadow)"/>
+    <rect x="0" y="0" width="1440" height="6" rx="3" fill="url(#purpleGrad)"/>
+    <text x="30" y="36" font-size="16" font-weight="700" fill="#c084fc" letter-spacing="1.5">STAGE 3: SPECIALIZED AGENT EXECUTION LAYER (NO DIRECT DB ACCESS)</text>
+
+    <!-- Agent 1: Extraction Agent -->
+    <g transform="translate(30, 60)">
+      <rect width="320" height="175" rx="10" fill="#0f172a" stroke="#38bdf8" stroke-width="1.5"/>
+      <rect x="10" y="10" width="300" height="26" rx="5" fill="#0369a1"/>
+      <text x="160" y="28" font-size="13" font-weight="700" fill="#f0f9ff" text-anchor="middle">📊 EXTRACTION AGENT</text>
+      <text x="15" y="60" font-size="12" fill="#93c5fd">• Pure In-Memory Tabular Parser</text>
+      <text x="15" y="80" font-size="12" fill="#e2e8f0">• Revenue, Operating Income, Net Income</text>
+      <text x="15" y="100" font-size="12" fill="#e2e8f0">• Total Assets, Total Liabilities, EPS</text>
+      <text x="15" y="120" font-size="12" fill="#e2e8f0">• Operating Margin &amp; Segment Breakdown</text>
+      <text x="15" y="145" font-size="11" font-weight="600" fill="#38bdf8">Output: Pydantic ExtractionResponse</text>
+    </g>
+
+    <!-- Agent 2: Red Flag Agent -->
+    <g transform="translate(380, 60)">
+      <rect width="320" height="175" rx="10" fill="#0f172a" stroke="#f43f5e" stroke-width="1.5"/>
+      <rect x="10" y="10" width="300" height="26" rx="5" fill="#be123c"/>
+      <text x="160" y="28" font-size="13" font-weight="700" fill="#fff1f2" text-anchor="middle">🚩 RED FLAG AGENT</text>
+      <text x="15" y="60" font-size="12" fill="#fda4af">• 10+ Risk Factor Evaluation Engine</text>
+      <text x="15" y="80" font-size="12" fill="#e2e8f0">• Margin Compression &amp; Debt Spikes</text>
+      <text x="15" y="100" font-size="12" fill="#e2e8f0">• Negative Cash Flow &amp; Concentration</text>
+      <text x="15" y="120" font-size="12" fill="#e2e8f0">• CrewAI / Gemini + Offline Analyzer</text>
+      <text x="15" y="145" font-size="11" font-weight="600" fill="#fb7185">Output: High / Medium / Low Risk Flags</text>
+    </g>
+
+    <!-- Agent 3: Research Agent -->
+    <g transform="translate(730, 60)">
+      <rect width="340" height="175" rx="10" fill="#0f172a" stroke="#a855f7" stroke-width="1.5"/>
+      <rect x="10" y="10" width="320" height="26" rx="5" fill="#6d28d9"/>
+      <text x="170" y="28" font-size="13" font-weight="700" fill="#faf5ff" text-anchor="middle">🔎 RESEARCH AGENT</text>
+      <text x="15" y="60" font-size="12" fill="#d8b4fe">• Multi-Part Question Decomposition</text>
+      <text x="15" y="80" font-size="12" fill="#e2e8f0">• Causal 'Why' Reasoning &amp; Driver Ranking</text>
+      <text x="15" y="100" font-size="12" fill="#e2e8f0">• Gemini / Ollama / Grounded Fallback</text>
+      <text x="15" y="120" font-size="12" fill="#e2e8f0">• Exact Claim-Level Citations Attached</text>
+      <text x="15" y="145" font-size="11" font-weight="600" fill="#c084fc">Output: Grounded Markdown Tables &amp; QA</text>
+    </g>
+
+    <!-- Agent 4: Comparison Agent -->
+    <g transform="translate(1100, 60)">
+      <rect width="310" height="175" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-width="1.5"/>
+      <rect x="10" y="10" width="290" height="26" rx="5" fill="#b45309"/>
+      <text x="155" y="28" font-size="13" font-weight="700" fill="#fffbeb" text-anchor="middle">⚖️ COMPARISON AGENT</text>
+      <text x="15" y="60" font-size="12" fill="#fde68a">• Peer-to-Peer Benchmark Analytics</text>
+      <text x="15" y="80" font-size="12" fill="#e2e8f0">• Company A vs Company B Analytics</text>
+      <text x="15" y="100" font-size="12" fill="#e2e8f0">• FY2024 vs FY2025 Multi-Period Deltas</text>
+      <text x="15" y="120" font-size="12" fill="#e2e8f0">• Growth Rate &amp; Margin Calculations</text>
+      <text x="15" y="145" font-size="11" font-weight="600" fill="#fcd34d">Output: Delta &amp; Variance Matrix</text>
+    </g>
+  </g>
+
+  <!-- Connect Specialized Agents to Stage 4 -->
+  <path d="M 800 880 L 800 930" stroke="#f59e0b" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
+  <text x="815" y="910" font-size="12" font-weight="600" fill="#f59e0b">Synthesize Outputs</text>
+
+  <!-- ==================== STAGE 4: VALIDATION & REPORTING ==================== -->
+  <g transform="translate(80, 930)">
+    <!-- Container Box -->
+    <rect width="1440" height="190" rx="16" fill="url(#cardBg)" stroke="#334155" stroke-width="2" filter="url(#dropShadow)"/>
+    <rect x="0" y="0" width="1440" height="6" rx="3" fill="url(#emeraldGrad)"/>
+    <text x="30" y="36" font-size="16" font-weight="700" fill="#34d399" letter-spacing="1.5">STAGE 4: EVIDENCE VALIDATION &amp; PUBLICATION-QUALITY REPORTING</text>
+
+    <!-- Evidence Validator Card -->
+    <g transform="translate(40, 55)">
+      <rect width="400" height="110" rx="10" fill="#0f172a" stroke="#10b981" stroke-width="1.5"/>
+      <text x="200" y="32" font-size="15" font-weight="700" fill="#34d399" text-anchor="middle">🛡️ Evidence Validator (evidence_validator.py)</text>
+      <text x="20" y="60" font-size="12" fill="#cbd5e1">• Numerical Grounding: Rejects fabricated numbers</text>
+      <text x="20" y="80" font-size="12" fill="#cbd5e1">• Section Matching &amp; Out-of-Scope Claim Rejection</text>
+      <text x="20" y="100" font-size="12" fill="#6ee7b7">• Verified Citations: [Company | Year | Section | Chunk]</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 450 110 L 530 110" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+
+    <!-- Report Agent Card -->
+    <g transform="translate(540, 55)">
+      <rect width="410" height="110" rx="10" fill="#0f172a" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="205" y="32" font-size="15" font-weight="700" fill="#c084fc" text-anchor="middle">📑 Report Agent (report_agent.py)</text>
+      <text x="20" y="60" font-size="12" fill="#cbd5e1">• Canonical Multi-Agent Aggregation Schema</text>
+      <text x="20" y="80" font-size="12" fill="#cbd5e1">• Synthesizes Extraction, Research &amp; Risk Findings</text>
+      <text x="20" y="100" font-size="12" fill="#cbd5e1">• Executive Summary &amp; Key Metrics Compilation</text>
+    </g>
+
+    <!-- Arrow -->
+    <path d="M 960 110 L 1030 110" stroke="#34d399" stroke-width="3" fill="none" marker-end="url(#arrowGreen)"/>
+
+    <!-- PDF Builder Card -->
+    <g transform="translate(1040, 55)">
+      <rect width="360" height="110" rx="10" fill="#0f172a" stroke="#f43f5e" stroke-width="1.5"/>
+      <text x="180" y="32" font-size="15" font-weight="700" fill="#fb7185" text-anchor="middle">📄 PDFBuilder (ReportService)</text>
+      <text x="20" y="60" font-size="12" fill="#cbd5e1">• Formal Multi-Page Research Report</text>
+      <text x="20" y="80" font-size="12" fill="#cbd5e1">• Clean Typography, Grids, Risk Matrices</text>
+      <text x="20" y="100" font-size="12" font-weight="600" fill="#fb7185">• Direct Stream / Download Endpoint</text>
+    </g>
+  </g>
+</svg>
+
+  </div>
+</body>
+</html>
