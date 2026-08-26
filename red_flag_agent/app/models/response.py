@@ -10,6 +10,8 @@ class RedFlag(BaseModel):
     reason: str
     evidence: str
     page: Optional[int] = None
+    source_file: Optional[str] = None
+    source_chunk: Optional[str] = None
     recommendation: str
     confidence: float
 

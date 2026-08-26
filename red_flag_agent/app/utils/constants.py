@@ -1,6 +1,7 @@
 RISK_CATEGORIES = [
     "Debt",
     "Liquidity",
+    "Market",
     "Profitability",
     "Revenue",
     "Cash Flow",

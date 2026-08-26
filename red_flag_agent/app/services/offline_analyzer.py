@@ -18,6 +18,8 @@ class OfflineAnalyzer:
             "recommendation": "Review debt maturity, covenant headroom, and financing plans.",
             "patterns": [
                 r"\b(?:total debt|borrowings?|debt|leverage|net debt)\b[^.!?]{0,120}\b(?:increas(?:e|ed|ing)|rose|higher|rising|up|climb(?:ed)?)\b",
+                r"\b(?:total debt|borrowings?|debt|leverage|net debt)\b[^.!?]{0,40}\b(?:is|was|remains?)\s+(?:higher|elevated|rising)\b",
+                r"\b(?:higher|elevated|rising)\s+(?:total\s+)?(?:debt|borrowings?|leverage|net debt)\b",
                 r"\b(?:total debt|borrowings?|debt|leverage|net debt)\b[^.!?]{0,120}\$\s*[\d,]+(?:\.\d+)?\s*(?:million|billion|bn|m)"
             ],
             "negations": [
@@ -168,32 +170,37 @@ class OfflineAnalyzer:
             }
 
         flags: List[Dict[str, Any]] = []
-        seen_evidence: set[str] = set()
+        flag_by_identity: Dict[Tuple[str, str, str], Tuple[Dict[str, Any], float]] = {}
         for rule in self._RISK_RULES:
             for sentence, metadata in sentences:
                 if self._sentence_has_negation(sentence, rule["patterns"], rule["negations"]):
                     continue
                 if self._sentence_has_nil_or_missing_value(sentence):
                     continue
-                if any(re.search(pattern, sentence, flags=re.I) for pattern in rule["patterns"]):
-                    evidence_key = sentence.lower().strip()
-                    if evidence_key in seen_evidence:
-                        continue
-                    source_page = metadata.get("page_number") or metadata.get("page_start") or metadata.get("page") or None
-                    flags.append({
+                matched = any(re.search(pattern, sentence, flags=re.I) for pattern in rule["patterns"])
+                if matched and self._is_valid_risk_evidence(rule, sentence) and not self._is_generic_risk_phrase(rule, sentence):
+                    source_page = self._resolve_page(metadata)
+                    confidence = self._calculate_confidence(rule, sentence, metadata)
+                    evidence_strength = self._evidence_strength(rule, sentence, metadata)
+                    flag = {
                         "category": rule["category"],
-                        "severity": rule["severity"],
+                        "severity": self._calculate_severity(confidence, rule["severity"]),
                         "title": rule["title"],
                         "description": rule["description"],
                         "reason": rule["reason"],
                         "evidence": sentence[:500],
-                        "page": int(source_page) if isinstance(source_page, (int, float)) and str(source_page).strip() else None,
-                        "source_file": metadata.get("source_file") or metadata.get("source") or "document",
-                        "source_chunk": metadata.get("chunk_id"),
+                        "page": source_page,
+                        "source_file": self._resolve_source_file(metadata),
+                        "source_chunk": self._resolve_source_chunk(metadata),
                         "recommendation": rule["recommendation"],
-                        "confidence": 0.82,
-                    })
-                    seen_evidence.add(evidence_key)
+                        "confidence": confidence,
+                    }
+                    identity = (rule["category"], rule["title"], self._risk_source_context(metadata))
+                    existing = flag_by_identity.get(identity)
+                    if existing is None or evidence_strength > existing[1]:
+                        flag_by_identity[identity] = (flag, evidence_strength)
+
+        flags = [flag for flag, _ in flag_by_identity.values()]
 
         if not flags:
             return {
@@ -212,6 +219,146 @@ class OfflineAnalyzer:
             "execution_time": 0.0,
             "model_used": "offline-fallback",
         }
+
+    @staticmethod
+    def _resolve_page(metadata: Any) -> Optional[int]:
+        """Resolve the first valid page from direct and nested provenance metadata."""
+        if not isinstance(metadata, dict):
+            return None
+        containers = [metadata]
+        for key in ("provenance", "source_metadata", "source"):
+            nested = metadata.get(key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for field in ("page_number", "source_page", "page_start", "page"):
+            for container in containers:
+                value = container.get(field)
+                if isinstance(value, bool) or value is None:
+                    continue
+                try:
+                    page = float(str(value).strip())
+                except (TypeError, ValueError):
+                    continue
+                if page > 0 and page.is_integer():
+                    return int(page)
+        return None
+
+    @staticmethod
+    def _resolve_source_file(metadata: Any) -> Optional[str]:
+        if not isinstance(metadata, dict):
+            return None
+        containers = [metadata]
+        for key in ("provenance", "source_metadata", "source"):
+            nested = metadata.get(key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for container in containers:
+            for field in ("source_file", "source"):
+                value = container.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    @staticmethod
+    def _resolve_source_chunk(metadata: Any) -> Optional[str]:
+        if not isinstance(metadata, dict):
+            return None
+        containers = [metadata]
+        for key in ("provenance", "source_metadata", "source"):
+            nested = metadata.get(key)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for container in containers:
+            for field in ("chunk_id", "source_chunk_id", "chunk"):
+                value = container.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    @staticmethod
+    def _risk_source_context(metadata: Any) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        for key in ("section_title", "section", "source_type"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.casefold().strip()
+        for key in ("provenance", "source_metadata", "source"):
+            nested = metadata.get(key)
+            if isinstance(nested, dict):
+                for field in ("section_title", "section", "source_type"):
+                    value = nested.get(field)
+                    if isinstance(value, str) and value.strip():
+                        return value.casefold().strip()
+        return ""
+
+    @staticmethod
+    def _is_valid_risk_evidence(rule: Dict[str, Any], sentence: str) -> bool:
+        lowered = sentence.casefold()
+        word_count = len(re.findall(r"\b\w+\b", lowered))
+        if word_count < 4 and rule["category"] != "Debt":
+            return False
+        explicit_risk = re.search(
+            r"\b(?:risk|pressure|exposure|volatile|volatility|material weakness|restatement|litigation|lawsuit|investigation|penalty|declin(?:e|ed|ing)|fell|drop(?:ped)?|reduc(?:e|ed|tion)|increas(?:e|ed|ing)|rose|higher|rising|negative|shortfall|strain|concentrat(?:ed|ion)|dependenc(?:e|y))\b",
+            lowered,
+        )
+        if not explicit_risk:
+            return False
+        category = rule["category"]
+        if category == "Accounting":
+            return bool(re.search(r"material weakness|restatement|internal control|accounting (?:issue|concern)|revenue recognition.{0,60}(?:issue|concern|risk|change)", lowered))
+        if category == "Legal":
+            return bool(re.search(r"(?:litigation|lawsuit|investigation|penalty|regulatory).{0,100}(?:exposure|risk|claim|proceeding|material|significant|pending|settlement)", lowered))
+        if category == "Market":
+            return bool(re.search(r"(?:currency|foreign exchange|fx|interest rate|rates).{0,100}(?:risk|volatility|exposure|sensitivity|headwind|pressure|fluctuation)", lowered))
+        return True
+
+    @staticmethod
+    def _is_generic_risk_phrase(rule: Dict[str, Any], sentence: str) -> bool:
+        """Reject a rule label or keyword fragment without source evidence."""
+        normalized = re.sub(r"[^a-z0-9]+", " ", sentence.casefold()).strip()
+        title = re.sub(r"[^a-z0-9]+", " ", rule["title"].casefold()).strip()
+        if normalized == title:
+            return True
+        generic_terms = {
+            "risk", "risks", "increase", "increased", "decline", "declined",
+            "concentration", "concentrated", "exposure", "issue", "issues",
+        }
+        words = normalized.split()
+        title_words = set(title.split())
+        return len(words) <= 4 and set(words).issubset(title_words | generic_terms)
+
+    @staticmethod
+    def _evidence_strength(rule: Dict[str, Any], sentence: str, metadata: Any) -> float:
+        lowered = sentence.casefold()
+        score = 0.25
+        if re.search(r"[$€£₹¥]\s*[\d,]+|\b\d+(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\s*(?:million|billion|crore|bn|m)\b", lowered):
+            score += 0.35
+        if re.search(r"\b(?:from|to|versus|compared with|compared to|prior year|previous year|year-over-year|fy\s*\d{2,4})\b", lowered):
+            score += 0.2
+        if re.search(r"\b(?:material|significant|severe|substantial|major|identified|disclosed|exposed|pressure|drivers?|cause|caused|due to|because)\b", lowered):
+            score += 0.2
+        if re.search(r"\b(?:declin(?:e|ed|ing)|fell|drop(?:ped)?|reduc(?:e|ed|tion)|increas(?:e|ed|ing)|rose|higher|rising|negative|shortfall|weakened)\b", lowered):
+            score += 0.2
+        if re.search(r"\b(?:identified|disclosed|reported|exposed|may affect|could affect|unable to|failed|drivers?)\b", lowered):
+            score += 0.1
+        if OfflineAnalyzer._resolve_page(metadata) is not None or OfflineAnalyzer._resolve_source_chunk(metadata):
+            score += 0.05
+        return min(score, 1.0)
+
+    @classmethod
+    def _calculate_confidence(cls, rule: Dict[str, Any], sentence: str, metadata: Any) -> float:
+        return round(cls._evidence_strength(rule, sentence, metadata), 2)
+
+    @staticmethod
+    def _calculate_severity(confidence: float, default: str) -> str:
+        if confidence >= 0.95:
+            return "Critical"
+        if confidence >= 0.75:
+            return "High"
+        if confidence >= 0.55:
+            return "Medium"
+        return "Low"
 
     @staticmethod
     def _extract_sentences(context_chunks: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -233,8 +380,12 @@ class OfflineAnalyzer:
     @staticmethod
     def _sentence_has_nil_or_missing_value(sentence: str) -> bool:
         lowered = sentence.lower()
-        nil_tokens = ["nil", "n/a", "not available", "not disclosed", "none", "zero", "0%", "0.0%", "no value", "n.a."]
-        return any(token in lowered for token in nil_tokens) and not any(token in lowered for token in ["noted", "cited", "reported", "indicated", "disclose", "disclosed"])
+        nil_patterns = [
+            r"\bnil\b", r"\bn/?a\b", r"\bnot available\b", r"\bnot disclosed\b",
+            r"\bnone\b", r"\bzero\b", r"(?<![\d.])0(?:\.0+)?%\b",
+            r"\bno value\b", r"\bn\.a\.\b",
+        ]
+        return any(re.search(pattern, lowered) for pattern in nil_patterns) and not any(token in lowered for token in ["noted", "cited", "reported", "indicated", "disclose", "disclosed"])
 
     @staticmethod
     def _sentence_has_negation(sentence: str, patterns: List[str], negations: List[str]) -> bool:
@@ -249,6 +400,8 @@ class OfflineAnalyzer:
     @staticmethod
     def _overall_risk(flags: List[Dict[str, Any]]) -> str:
         severities = [flag.get("severity", "Low") for flag in flags]
+        if any(sev == "Critical" for sev in severities):
+            return "Critical"
         if any(sev == "High" for sev in severities):
             return "High"
         if any(sev == "Medium" for sev in severities):
