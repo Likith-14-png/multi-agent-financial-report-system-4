@@ -269,9 +269,9 @@ def validate_source_pdf(ctx: ValidationContext) -> None:
             PROJECT_ROOT / "backend" / "tmp_uploads" / source_filename,
         ])
 
-    # General fallback search for PDF files
-    candidate_pdf_paths.extend(list(PROJECT_ROOT.glob("**/ABB*Mock*.pdf")))
-    candidate_pdf_paths.extend(list(PROJECT_ROOT.glob("**/*.pdf")))
+    # Only validate PDF text when it can be tied to the stored source name.
+    # Falling back to an arbitrary generated PDF compares unrelated chunks
+    # and produces false page-range and consistency failures.
 
     resolved_pdf: Optional[Path] = None
     for p in candidate_pdf_paths:

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from backend.api import app
 from backend.orchestration.session_store import session_store
 from backend.orchestration.workflow import AnalysisWorkflow
+import research_agent as research_agent_module
 from research_agent import ResearchAgent, Citation, ResearchStep, ResearchAnswer
 
 client = TestClient(app)
@@ -254,3 +255,56 @@ def test_custom_llm_generator_used():
 
     assert answer.model_used == "custom-llm"
     assert "LLM SYNTHESIS" in answer.final_answer
+
+
+def test_research_agent_uses_shared_question_and_retrieval_components(monkeypatch):
+    calls = {}
+
+    class DummyIntent:
+        def __init__(self):
+            self.target_metrics = ["revenue"]
+            self.target_entities = []
+            self.target_years = ["2025"]
+            self.is_causal = False
+            self.requires_ranking = False
+            self.requires_calculation = False
+            self.target_company = "ABB"
+            self.original_question = "Why did ABB revenue increase?"
+            self.intent_type = type("T", (), {"value": "financial_metric"})()
+
+    class DummyAnalyzer:
+        @staticmethod
+        def analyze(question, target_company=None):
+            calls["analyze"] = question
+            return DummyIntent()
+
+    class DummyRetrievalService:
+        def __init__(self, collection):
+            self.collection = collection
+
+        def retrieve_for_question(self, question, analysis_id=None, document_id=None, company_name=None, top_k=5):
+            calls["retrieval"] = question
+            return [type("R", (), {"chunk_id": "r1", "text": "ABB revenue increased 14% to $15.3 billion.", "metadata": {"company_name": "ABB", "section_title": "Management Discussion and Analysis", "source_file": "abb_2025.txt", "chunk_id": "r1"}, "relevance_score": 0.9, "retrieval_method": "semantic"})()]
+
+    monkeypatch.setattr(research_agent_module, "SharedQuestionIntentAnalyzer", DummyAnalyzer)
+    monkeypatch.setattr(research_agent_module, "EvidenceRetrievalService", DummyRetrievalService)
+
+    mock_collection = MockChromaIsolationCollection([
+        {
+            "id": "r1",
+            "document": "ABB revenue increased 14% to $15.3 billion.",
+            "metadata": {
+                "company_name": "ABB",
+                "analysis_id": "session-dummy",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "abb_2025.txt",
+                "chunk_id": "r1",
+            },
+        }
+    ])
+
+    agent = ResearchAgent(mock_collection)
+    agent.answer("Why did ABB revenue increase?", company="ABB", analysis_id="session-dummy")
+
+    assert calls.get("analyze") == "Why did ABB revenue increase?"
+    assert calls.get("retrieval") == "Why did ABB revenue increase?"

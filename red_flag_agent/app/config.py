@@ -14,7 +14,7 @@ load_dotenv()
 
 CHROMA_DIR = os.getenv("CHROMA_DB_PATH", os.getenv("CHROMA_DIR", str(BASE_DIR / "chroma_db")))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("GEMINI_MODEL", "gemini-2.5-pro"))
+MODEL_NAME = os.getenv("MODEL_NAME", os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/text-embedding-004")
 DEFAULT_COLLECTION_NAME = os.getenv("DEFAULT_COLLECTION_NAME", "default_collection")
 DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "5"))

@@ -22,10 +22,12 @@ if str(REPORT_AGENT_PATH) not in sys.path:
 
 from document_agent import DocumentAgent, DocumentAgentConfig
 from extraction_agent import extract_report_metrics
-from research_agent import ResearchAgent
+from research_agent import ResearchAgent, ResearchAnswer
 from compare import ComparisonResult, compare_company_metrics, compare_report_metrics
+from evidence_retrieval_service import EvidenceRetrievalService
 from app.agents.crew import RedFlagCrew
 from app.services.gemini_service import GeminiService
+from app.services.offline_analyzer import OfflineAnalyzer
 from report_agent import ReportAgent
 from report_service import ReportService
 from models import (
@@ -255,30 +257,55 @@ class AnalysisWorkflow:
     ) -> Dict[str, Any]:
         effective_company_name = company_name or "Company"
         collection = self.document_agent.collection
-        company_filter = {"company_name": effective_company_name} if effective_company_name else None
-        red_flag_query = f"{effective_company_name} financial report risks financial statements performance"
-        try:
-            raw_results = collection.query(
-                query_texts=[red_flag_query],
-                n_results=5,
-                where=company_filter,
-                include=["documents", "metadatas", "distances"],
-            )
-            docs = (raw_results.get("documents") or [[]])[0]
-            metas = (raw_results.get("metadatas") or [[]])[0]
-        except Exception:
-            docs, metas = [], []
+        retrieval_service = EvidenceRetrievalService(collection)
+        risk_queries = [
+            f"{effective_company_name} debt increase leverage refinancing risk",
+            f"{effective_company_name} margin decline operating income profitability pressure",
+            f"{effective_company_name} cash flow decline liquidity working capital risk",
+            f"{effective_company_name} legal accounting risk litigation internal controls",
+            f"{effective_company_name} customer concentration revenue dependence risk",
+            f"{effective_company_name} currency fx interest rate volatility risk",
+        ]
 
         retrieved_chunks: List[Dict[str, Any]] = []
-        for document, metadata in zip(docs, metas):
-            retrieved_chunks.append({"document": document, "metadata": metadata or {}})
+        seen_ids: set[str] = set()
+        for query_text in risk_queries:
+            try:
+                results = retrieval_service.retrieve_for_question(
+                    query_text,
+                    analysis_id=analysis_id,
+                    company_name=effective_company_name,
+                    top_k=5,
+                )
+            except Exception:
+                results = []
+            for result in results:
+                cid = str(result.metadata.get("chunk_id") if result.metadata else result.chunk_id)
+                if cid and cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+                retrieved_chunks.append({
+                    "document": result.text,
+                    "metadata": result.metadata or {},
+                })
+
+        if not retrieved_chunks:
+            analysis_records = collection.get(where={"analysis_id": analysis_id}, include=["documents", "metadatas"]) if collection else {"documents": [], "metadatas": []}
+            docs = analysis_records.get("documents") or []
+            metas = analysis_records.get("metadatas") or []
+            for document, metadata in zip(docs, metas):
+                if isinstance(metadata, dict):
+                    retrieved_chunks.append({"document": document, "metadata": metadata})
 
         api_key = os.getenv("GEMINI_API_KEY")
         gemini_service = GeminiService(api_key=api_key or "")
         if not api_key:
             gemini_service.api_key = ""
 
-        red_flag_result = RedFlagCrew(gemini_service=gemini_service).analyze(effective_company_name, retrieved_chunks)
+        try:
+            red_flag_result = RedFlagCrew(gemini_service=gemini_service).analyze(effective_company_name, retrieved_chunks)
+        except Exception:
+            red_flag_result = {"overall_risk": "Unavailable", "total_flags": 0, "flags": [], "model_used": "unavailable"}
         red_flag_result["analysis_id"] = analysis_id
         return red_flag_result
 
@@ -302,24 +329,36 @@ class AnalysisWorkflow:
         rf = red_flags or self.run_red_flags(analysis_id, company_name=effective_company)
         cmp = comparison or compare_report_metrics(ext)
 
-        report_agent = ReportAgent()
-        report_result = report_agent.generate(
-            extraction=ext,
-            research={
-                "answer": res.get("answer") or res.get("summary") or "",
-                "sources": res.get("sources") or res.get("evidence") or [],
-                "evidence": res.get("evidence") or res.get("sources") or [],
-            },
-            red_flags=rf,
-            comparison=cmp,
-            metadata={
+        upstream = {
+            "metadata": {
                 "analysis_id": analysis_id,
                 "document_id": doc_id,
                 "company_name": effective_company,
                 "report_year": effective_year,
                 "chunk_id": ext.get("chunk_id"),
             },
-        )
+            "extraction": ext,
+            "research": {
+                "answer": res.get("answer") or res.get("summary") or "",
+                "sources": res.get("sources") or res.get("evidence") or [],
+                "evidence": res.get("evidence") or res.get("sources") or [],
+            },
+            "red_flags": rf,
+            "comparison": cmp,
+            "report": {},
+        }
+        validated_upstream = validate_analysis_context(upstream)
+        report_agent = ReportAgent()
+        try:
+            report_result = report_agent.generate(
+                extraction=validated_upstream.extraction,
+                research=validated_upstream.research,
+                red_flags=validated_upstream.red_flags,
+                comparison=validated_upstream.comparison,
+                metadata=validated_upstream.metadata.model_dump(),
+            )
+        except Exception:
+            report_result = {"report_status": "failed", "executive_summary": "Analysis unavailable.", "metadata": upstream["metadata"]}
         return report_result
 
     def run_analysis(
@@ -381,14 +420,22 @@ class AnalysisWorkflow:
             returned_docs = []
 
         agent = ResearchAgent(collection)
-        answer = agent.answer(
-            effective_question,
-            top_k=4,
-            company=effective_company_name,
-            analysis_id=current_analysis_id,
-            document_id=document_id,
-            report_year=effective_report_year,
-        )
+        try:
+            answer = agent.answer(
+                effective_question,
+                top_k=4,
+                company=effective_company_name,
+                analysis_id=current_analysis_id,
+                document_id=document_id,
+                report_year=effective_report_year,
+            )
+        except Exception as exc:
+            answer = ResearchAnswer(
+                question=effective_question,
+                steps=[],
+                final_answer="Unavailable: research agent failed to complete.",
+                model_used="unavailable",
+            )
         research_dict = answer.to_dict(analysis_id=current_analysis_id)
         citations = research_dict["sources"]
 
@@ -416,7 +463,16 @@ class AnalysisWorkflow:
         if not api_key:
             gemini_service.api_key = ""
 
-        red_flag_result = RedFlagCrew(gemini_service=gemini_service).analyze(effective_company_name, retrieved_chunks)
+        try:
+            red_flag_result = RedFlagCrew(gemini_service=gemini_service).analyze(effective_company_name, retrieved_chunks)
+        except Exception:
+            red_flag_result = {
+                "overall_risk": "Unavailable",
+                "total_flags": 0,
+                "flags": [],
+                "execution_time": 0.0,
+                "model_used": "unavailable",
+            }
 
         # 3. Extraction Agent
         extracted_metrics: Dict[str, Any] = {}
@@ -424,11 +480,17 @@ class AnalysisWorkflow:
         if current_records:
             combined_text = "\n\n".join(doc for doc, _ in current_records if isinstance(doc, str))
             doc_meta = current_records[0][1] if current_records else {}
-            extracted_metrics = extract_report_metrics(combined_text, metadata=doc_meta)
+            try:
+                extracted_metrics = extract_report_metrics(combined_text, metadata=doc_meta)
+            except Exception:
+                extracted_metrics = {"status": "unavailable", "error": "Extraction agent failed to complete."}
         else:
             sample_docs = sample.get("documents") or []
             combined_text = "\n\n".join(doc for doc in sample_docs if isinstance(doc, str))
-            extracted_metrics = extract_report_metrics(combined_text, metadata=first_meta)
+            try:
+                extracted_metrics = extract_report_metrics(combined_text, metadata=first_meta)
+            except Exception:
+                extracted_metrics = {"status": "unavailable", "error": "Extraction agent failed to complete."}
 
         extracted_metrics["analysis_id"] = current_analysis_id
         extracted_metrics["document_id"] = document_id
@@ -459,22 +521,6 @@ class AnalysisWorkflow:
 
         # 4. Yearly trend calculations (for internal report agent contract)
         single_doc_comparison = compare_report_metrics(extracted_metrics)
-
-        # 5. Report Agent
-        report_agent = ReportAgent()
-        report_result = report_agent.generate(
-            extraction=extracted_metrics,
-            research={"answer": answer.final_answer, "sources": citations},
-            red_flags=red_flag_result,
-            comparison=single_doc_comparison,
-            metadata={
-                "analysis_id": current_analysis_id,
-                "document_id": document_id,
-                "company_name": effective_company_name,
-                "report_year": effective_report_year,
-                "chunk_id": extracted_metrics.get("chunk_id"),
-            },
-        )
 
         comparison_payload = single_doc_comparison if isinstance(single_doc_comparison, dict) else dict(single_doc_comparison)
         comparison_payload = single_doc_comparison if hasattr(single_doc_comparison, "columns") else ComparisonResult(comparison_payload)
@@ -513,9 +559,27 @@ class AnalysisWorkflow:
                 },
             },
             "comparison": comparison_payload,
-            "report": report_result,
+            "report": {},
         }
 
+        # Validate all upstream agent outputs before the Report Agent consumes them.
+        validated_upstream = validate_analysis_context(context)
+        report_agent = ReportAgent()
+        try:
+            report_result = report_agent.generate(
+                extraction=validated_upstream.extraction,
+                research=validated_upstream.research,
+                red_flags=validated_upstream.red_flags,
+                comparison=validated_upstream.comparison,
+                metadata=validated_upstream.metadata.model_dump(),
+            )
+        except Exception:
+            report_result = {
+                "report_status": "failed",
+                "executive_summary": "Analysis unavailable.",
+                "metadata": context["metadata"],
+            }
+        context["report"] = report_result
         validated_context = validate_analysis_context(context)
         response = {
             "status": "success",
@@ -560,29 +624,45 @@ class AnalysisWorkflow:
         return answer.to_dict(analysis_id=analysis_id)
 
     def run_red_flags_query(self, analysis_id: str, question: str, company_name: Optional[str] = None) -> Dict[str, Any]:
-        """Execute a risk/red-flag specific query grounded in ChromaDB document evidence."""
+        """Execute a risk/red-flag question grounded in document evidence, not ResearchAgent output."""
         collection = self.document_agent.collection
-        agent = ResearchAgent(collection)
-        answer = agent.answer(question, top_k=4, company=company_name)
+        retrieval_service = EvidenceRetrievalService(collection)
+        evidence = retrieval_service.retrieve_for_question(
+            question,
+            analysis_id=analysis_id,
+            company_name=company_name,
+            top_k=5,
+        )
+
+        chunks = [{"document": result.text, "metadata": result.metadata or {}} for result in evidence]
+        analysis = OfflineAnalyzer().analyze(question, chunks)
 
         citations: List[Dict[str, Any]] = []
-        for step in answer.steps:
-            for citation in step.citations:
-                citations.append({
-                    "company": citation.company,
-                    "doc_type": citation.doc_type,
-                    "section": citation.section,
-                    "source_file": citation.source_file,
-                    "chunk_id": citation.chunk_id,
-                    "score": citation.score,
-                    "snippet": citation.snippet,
-                })
+        for result in evidence:
+            meta = result.metadata or {}
+            citations.append({
+                "company": meta.get("company_name") or company_name,
+                "doc_type": meta.get("doc_type") or "Annual Report",
+                "section": meta.get("section_title") or meta.get("section") or "Unknown",
+                "source_file": meta.get("source_file") or "document",
+                "chunk_id": meta.get("chunk_id") or result.chunk_id,
+                "score": result.relevance_score,
+                "snippet": (result.text or "")[:280],
+                "page": meta.get("page_number") or meta.get("page_start") or 1,
+            })
+
+        risk_summary = analysis.get("flags")
+        answer = (
+            f"Evidence review found {len(risk_summary)} red-flag(s) for the query: {question}."
+            if risk_summary else f"No red flags were supported by the indexed document evidence for: {question}."
+        )
 
         return {
             "analysis_id": analysis_id,
             "question": question,
-            "answer": answer.final_answer,
+            "answer": answer,
             "sources": citations,
+            "red_flags": analysis,
         }
 
     def run_comparison(
@@ -620,20 +700,14 @@ class AnalysisWorkflow:
         collection = self.document_agent.collection
         records_b = self._get_current_document_records(collection, second_company_name or "", second_document_id)
         if not records_b:
-            sample = collection.get(limit=10, include=["documents", "metadatas"])
-            metas = sample.get("metadatas") or []
-            matching_indices = [
-                i for i, m in enumerate(metas)
-                if isinstance(m, dict) and m.get("document_id") == second_document_id
-            ]
-            if matching_indices:
-                records_b = [(sample["documents"][i], metas[i]) for i in matching_indices]
-            else:
-                records_b = [(sample["documents"][0], metas[0])] if sample.get("documents") else []
+            records_b = []
 
         combined_text_b = "\n\n".join(doc for doc, _ in records_b if isinstance(doc, str))
         meta_b = records_b[0][1] if records_b else {}
-        extracted_b = extract_report_metrics(combined_text_b, metadata=meta_b)
+        try:
+            extracted_b = extract_report_metrics(combined_text_b, metadata=meta_b)
+        except Exception:
+            extracted_b = {"status": "unavailable", "financial_values": {}}
 
         effective_b_name = second_company_name or extracted_b.get("company_name") or meta_b.get("company_name") or path_b.stem
 
@@ -650,8 +724,8 @@ class AnalysisWorkflow:
 
         comparison_records: List[Dict[str, Any]] = []
         for label, key in metric_keys:
-            val_a = first_extracted.get(key)
-            val_b = extracted_b.get(key)
+            val_a = (first_extracted.get("financial_values") or {}).get(key) or first_extracted.get(key)
+            val_b = (extracted_b.get("financial_values") or {}).get(key) or extracted_b.get(key)
             res = compare_company_metrics(
                 {"company_name": first_company_name, "metric": label, "value": val_a},
                 {"company_name": effective_b_name, "metric": label, "value": val_b},
@@ -659,10 +733,11 @@ class AnalysisWorkflow:
             )
             comparison_records.append(res)
 
+        comparison_status = "completed" if any(row.get("comparison_status") in {"higher", "lower", "equal"} for row in comparison_records) else "partial"
         return {
             "analysis_id": analysis_id,
             "comparison_id": comparison_id,
-            "status": "completed",
+            "status": comparison_status,
             "companies": [first_company_name, effective_b_name],
             "comparison_document_id": second_document_id,
             "metrics": comparison_records,
@@ -670,6 +745,7 @@ class AnalysisWorkflow:
             "summary": {
                 "companies_compared": [first_company_name, effective_b_name],
                 "metrics_analyzed": len(comparison_records),
+                "comparison_status": comparison_status,
                 "company_a": first_company_name,
                 "company_b": effective_b_name,
             },
@@ -682,23 +758,27 @@ class AnalysisWorkflow:
         res_dict = session_data.get("research_result") or {}
         cmp_dict = session_data.get("comparison_result") or {}
 
-        def _safe_float(val: Any) -> Optional[float]:
-            if val is None:
-                return None
-            if isinstance(val, (int, float)):
-                return float(val)
-            import re
-            m = re.search(r"[-+]?\d+(?:\.\d+)?", str(val).replace(",", ""))
-            return float(m.group(0)) if m else None
-
         extraction = ExtractionData(
             company_name=session_data.get("company_name") or ext_dict.get("company_name") or "Company",
-            revenue=_safe_float(ext_dict.get("revenue")),
-            net_profit=_safe_float(ext_dict.get("net_income")),
-            eps=_safe_float(ext_dict.get("eps")),
-            assets=_safe_float(ext_dict.get("total_assets")),
-            liabilities=_safe_float(ext_dict.get("total_liabilities")),
-            cash_flow=_safe_float(ext_dict.get("cash_flow")),
+            revenue=ext_dict.get("revenue"),
+            net_profit=ext_dict.get("net_income"),
+            eps=ext_dict.get("eps"),
+            operating_margin=ext_dict.get("operating_margin"),
+            gross_margin=ext_dict.get("gross_margin"),
+            net_margin=ext_dict.get("net_margin"),
+            assets=ext_dict.get("total_assets"),
+            liabilities=ext_dict.get("total_liabilities"),
+            cash_flow=ext_dict.get("cash_flow"),
+            total_debt=ext_dict.get("total_debt"),
+            debt_to_equity=ext_dict.get("debt_to_equity"),
+            material_weakness=ext_dict.get("material_weakness"),
+            metrics=ext_dict.get("metrics") or [
+                {"metric": key.replace("_", " ").title(), "value": value}
+                for key, value in ext_dict.items()
+                if key not in {"metrics", "financial_values", "material_weakness"}
+                and value not in (None, "")
+                and isinstance(value, (str, int, float, dict))
+            ],
         )
 
         risk_items: List[RiskItem] = []
@@ -708,31 +788,56 @@ class AnalysisWorkflow:
                     RiskItem(
                         category=flag.get("category") or "Financial",
                         description=flag.get("description") or flag.get("title") or "Risk identified",
-                        severity=flag.get("severity") or "Medium",
+                        severity=flag.get("severity") or "Unknown",
+                        title=flag.get("title"),
+                        evidence=flag.get("evidence"),
+                        source=flag.get("source") or flag.get("source_file"),
+                        source_page=flag.get("source_page"),
+                        source_chunk=flag.get("source_chunk") or flag.get("chunk_id"),
                     )
                 )
         red_flags = RedFlagData(risks=risk_items)
 
         comp_companies: List[CompanyComparison] = []
-        if cmp_dict and cmp_dict.get("companies"):
-            for comp_name in cmp_dict["companies"]:
-                comp_companies.append(CompanyComparison(company_name=comp_name))
-        comparison = ComparisonData(companies=comp_companies)
+        comparison_records = cmp_dict.get("records") or cmp_dict.get("metrics") or []
+        company_values: Dict[str, Dict[str, Any]] = {}
+        for row in comparison_records:
+            if not isinstance(row, dict):
+                continue
+            metric = str(row.get("metric") or "").lower().replace(" ", "_")
+            for side in ("company_a", "company_b"):
+                item = row.get(side)
+                if isinstance(item, dict) and item.get("company_name"):
+                    company_values.setdefault(item["company_name"], {})[metric] = item.get("value")
+        for comp_name in cmp_dict.get("companies") or list(company_values):
+            values = company_values.get(comp_name, {})
+            comp_companies.append(CompanyComparison(
+                company_name=comp_name,
+                revenue=values.get("revenue"),
+                net_profit=values.get("net_income"),
+                operating_margin=values.get("operating_margin"),
+                debt=values.get("total_debt"),
+                cash_flow=values.get("cash_flow"),
+            ))
+        comparison = ComparisonData(companies=comp_companies, records=comparison_records)
 
         research_items: List[ResearchItem] = []
-        answer_text = res_dict.get("answer") or "Financial analysis completed."
-        sources = res_dict.get("sources") or []
-        evidence_text = sources[0].get("snippet", "Evidence retrieved.") if sources and isinstance(sources[0], dict) else "Evidence retrieved."
-        source_text = sources[0].get("source_file", "Annual Report") if sources and isinstance(sources[0], dict) else "Annual Report"
-
-        research_items.append(
-            ResearchItem(
-                question="What are the key financial performance highlights?",
-                answer=answer_text,
-                evidence=evidence_text,
-                source=source_text,
-            )
-        )
+        sources = res_dict.get("sources") or res_dict.get("evidence") or []
+        answer_text = res_dict.get("answer") or ""
+        if answer_text or sources:
+            if not sources:
+                sources = [{}]
+            for source in sources:
+                source = source if isinstance(source, dict) else {}
+                research_items.append(ResearchItem(
+                    question=res_dict.get("question") or "Research finding",
+                    answer=answer_text,
+                    evidence=source.get("snippet") or source.get("evidence") or "",
+                    source=source.get("source_file") or source.get("source") or "",
+                    source_page=source.get("source_page") or source.get("page"),
+                    source_chunk=source.get("source_chunk") or source.get("chunk_id"),
+                    citation=source.get("citation"),
+                ))
 
         report_data = ReportData(
             extraction=extraction,

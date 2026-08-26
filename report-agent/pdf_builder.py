@@ -21,7 +21,7 @@ from formatter import ReportFormatter
 from analysis import FinancialAnalysis
 from tables import ReportTables
 from charts import ChartGenerator
-from styles import ReportStyles
+from styles import ReportStyles, REPORT_BOLD_FONT, REPORT_FONT
 from models import ReportData
 
 
@@ -51,7 +51,7 @@ class PDFBuilder:
 
         # Header
 
-        canvas.setFont("Helvetica-Bold", 10)
+        canvas.setFont(REPORT_BOLD_FONT, 10)
 
         canvas.drawString(
             40,
@@ -61,7 +61,7 @@ class PDFBuilder:
 
         # Footer
 
-        canvas.setFont("Helvetica", 9)
+        canvas.setFont(REPORT_FONT, 9)
 
         canvas.drawString(
             40,
@@ -275,7 +275,7 @@ class PDFBuilder:
 
         table = self.tables.financial_metrics_table(report)
 
-        self.story.append(table)
+        self.story.extend(table if isinstance(table, list) else [table])
 
         self.story.append(Spacer(1, 20))
 
@@ -483,7 +483,7 @@ class PDFBuilder:
 
         self.story.append(Spacer(1, 10))
 
-        table = self.tables.comparison_table(report)
+        table = self.tables.peer_comparison_table(report)
 
         self.story.append(table)
 
@@ -515,7 +515,7 @@ class PDFBuilder:
 
         table = self.tables.research_table(report)
 
-        self.story.append(table)
+        self.story.extend(table)
 
         self.story.append(Spacer(1, 20))
 
@@ -663,9 +663,7 @@ class PDFBuilder:
             )
         )
 
-        self.story.append(
-            self.tables.research_table(report)
-        )
+        self.story.extend(self.tables.research_table(report))
 
         self.story.append(PageBreak())
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional
 
 from compare import ComparisonResult
+from formatter import format_financial_value
 
 
 class ReportAgent:
@@ -34,18 +35,23 @@ class ReportAgent:
             return None
         return text
 
+
+    @staticmethod
+    def _is_valid_metric_value(record: Dict[str, Any]) -> bool:
+        """Check if a metric record has a displayable value (not a raw dict without numeric data)."""
+        value = record.get("value")
+        if value is None or value == "":
+            return False
+        if isinstance(value, dict):
+            # Only allow dicts that have been processed into display_value (has actual content)
+            # Reject raw structural dicts like {'numeric_value': 42, 'unit_multiplier': 1}
+            if value.get("display_value"):
+                return True
+            return False
+        return True
+
     @staticmethod
     def _metric_records_from_extraction(extraction: Dict[str, Any], metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        metric_names = [
-            ("Revenue", "revenue"),
-            ("Operating Income", "operating_income"),
-            ("Net Income", "net_income"),
-            ("Total Assets", "total_assets"),
-            ("Total Liabilities", "total_liabilities"),
-            ("Cash Flow", "cash_flow"),
-            ("EPS", "eps"),
-        ]
-
         records: List[Dict[str, Any]] = []
         metrics = extraction.get("metrics") if isinstance(extraction, dict) and isinstance(extraction.get("metrics"), list) else []
         if metrics:
@@ -55,33 +61,47 @@ class ReportAgent:
                 name = metric.get("metric") or metric.get("name")
                 if not name:
                     continue
+                display_value = metric.get("display_value")
                 records.append({
+
                     "metric": name,
-                    "value": metric.get("value") or metric.get("amount") or metric.get("current_value"),
-                    "unit": metric.get("unit") or "unitless",
+                    "value": display_value if display_value is not None else next((metric.get(key) for key in ("value", "amount", "current_value") if metric.get(key) is not None), None),
+                    "unit": metric.get("unit") or metric.get("unit_scale") or "unitless",
+                    "currency": metric.get("currency"),
                     "year": metric.get("year") or metric.get("report_year") or metadata.get("report_year"),
                     "source": metric.get("source") or extraction.get("source"),
+                    "source_page": metric.get("source_page") or metric.get("page"),
+                    "evidence": metric.get("evidence"),
                     "chunk_id": metric.get("chunk_id") or extraction.get("chunk_id") or metadata.get("chunk_id"),
                     "source_chunks": metric.get("source_chunks") or ([extraction.get("chunk_id")] if extraction.get("chunk_id") else []),
                 })
-            return records
+            return [r for r in records if ReportAgent._is_valid_metric_value(r)]
 
-        for metric_label, key_name in metric_names:
-            value = extraction.get(key_name)
-            if value is None and metric_label.lower().replace(" ", "_") in extraction:
-                value = extraction.get(metric_label.lower().replace(" ", "_"))
-            if value is None:
+        financial_values = extraction.get("financial_values") if isinstance(extraction.get("financial_values"), dict) else {}
+        candidates = list(financial_values.items())
+        excluded = {"metrics", "financial_values", "company_name", "report_year", "analysis_id", "document_id", "source", "source_file", "source_text", "chunk_id", "source_chunks", "status", "error", "yearly_metrics", "segment_metrics", "accounting_information", "risk_related_metrics", "income_statement", "balance_sheet", "cash_flow_statement", "observations", "detailed_metrics", "traceability", "financial_value_conflicts", "cash_reconciliation"}
+        candidates.extend((key, value) for key, value in extraction.items() if key not in financial_values and key not in excluded)
+        seen: set[str] = set()
+        for key_name, value in candidates:
+            if key_name in seen or value is None or value == "":
                 continue
+            seen.add(key_name)
+            metric_label = str(key_name).replace("_", " ").title()
+            value_dict = value if isinstance(value, dict) else {}
+            display_value = value_dict.get("display_value")
             records.append({
                 "metric": metric_label,
-                "value": value,
-                "unit": ReportAgent._extract_unit_from_value(value),
-                "year": extraction.get("report_year") or metadata.get("report_year"),
-                "source": extraction.get("source"),
-                "chunk_id": extraction.get("chunk_id") or metadata.get("chunk_id"),
-                "source_chunks": [extraction.get("chunk_id")] if extraction.get("chunk_id") else [],
+                "value": display_value if display_value is not None else value,
+                "unit": value_dict.get("unit") or value_dict.get("unit_scale") or ReportAgent._extract_unit_from_value(value),
+                "currency": value_dict.get("currency"),
+                "year": value_dict.get("period") or extraction.get("report_year") or metadata.get("report_year"),
+                "source": value_dict.get("source_file") or extraction.get("source"),
+                "source_page": value_dict.get("source_page"),
+                "evidence": value_dict.get("evidence"),
+                "chunk_id": value_dict.get("source_chunk") or extraction.get("chunk_id") or metadata.get("chunk_id"),
+                "source_chunks": [value_dict.get("source_chunk")] if value_dict.get("source_chunk") else ([extraction.get("chunk_id")] if extraction.get("chunk_id") else []),
             })
-        return records
+        return [r for r in records if ReportAgent._is_valid_metric_value(r)]
 
     @staticmethod
     def _numerical_metric_value(value: Any) -> Any:
@@ -167,9 +187,12 @@ class ReportAgent:
             findings.append({
                 "finding": answer or snippet,
                 "evidence": snippet,
+                "source": source.get("source_file") or source.get("source"),
+                "source_page": source.get("source_page") or source.get("page"),
+                "citation": source.get("citation"),
                 "source_chunks": source_chunks,
             })
-        return findings or [{"finding": "No research findings provided.", "evidence": "No evidence available.", "source_chunks": []}]
+        return findings
 
     @staticmethod
     def _risk_assessment(red_flags: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,9 +217,11 @@ class ReportAgent:
         for item in flags:
             if not isinstance(item, dict):
                 continue
-            recommendation = item.get("recommendation") or item.get("title") or item.get("description")
+            recommendation = item.get("recommendation")
             if recommendation:
-                recommendations.append(str(recommendation))
+                text = str(recommendation)
+                if text not in recommendations:
+                    recommendations.append(text)
         if recommendations:
             return recommendations
         return []
@@ -280,7 +305,10 @@ class ReportAgent:
         }
         for metric in financial_metrics:
             key = metric["metric"].lower().replace(" ", "_")
-            extraction_snapshot[key] = metric["value"]
+            value = metric.get("value")
+            if isinstance(value, dict):
+                value = value.get("display_value") if value.get("display_value") is not None else value.get("value")
+            extraction_snapshot[key] = value
 
         comparison_payload = self._comparison_payload(comparison)
         risk_assessment = self._risk_assessment(red_flags)
@@ -310,7 +338,7 @@ class ReportAgent:
         if financial_metrics:
             summary_bits.append(
                 "; ".join(
-                    f"{item['metric']}={item.get('value')}" for item in financial_metrics[:4]
+                    f"{item['metric']}={format_financial_value(item, item.get('metric'))}" for item in financial_metrics[:4]
                 )
             )
         if research_findings:
@@ -355,12 +383,5 @@ class ReportAgent:
                 "report_year": report_year,
             },
         }
-
-        if not recommendations and risk_assessment.get("flags"):
-            report["recommendations"] = [
-                str(flag.get("recommendation") or flag.get("title") or flag.get("description") or "Review the risk item with source evidence.")
-                for flag in risk_assessment.get("flags", [])
-                if isinstance(flag, dict)
-            ]
 
         return report

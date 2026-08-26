@@ -13,6 +13,13 @@ def test_verify_metadata_uses_active_collection_name():
     assert COLLECTION_NAME == "financial_research_v1"
 
 
+def test_company_field_beats_financial_unit_fragment():
+    agent = DocumentAgent.__new__(DocumentAgent)
+    text = "Company\nBorealis Manufacturing Group Ltd.\nPrimary Unit\nI million"
+
+    assert agent._extract_company_name(text) == "Borealis Manufacturing Group Ltd."
+
+
 def test_ingest_sample_text_file(tmp_path):
     db_path = tmp_path / "chroma_db"
     config = DocumentAgentConfig(

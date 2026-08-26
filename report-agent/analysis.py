@@ -5,6 +5,7 @@ Generates analytical commentary for the financial report.
 """
 
 from models import ReportData
+from formatter import format_financial_value
 
 
 class FinancialAnalysis:
@@ -17,29 +18,9 @@ class FinancialAnalysis:
         e = report.extraction
         analysis = []
 
-        metrics = [
-            ("Revenue", e.revenue),
-            ("Net Profit", e.net_profit),
-            ("EPS", e.eps),
-            ("Operating Margin", e.operating_margin),
-            ("Gross Margin", e.gross_margin),
-            ("EBITDA", e.ebitda),
-            ("Assets", e.assets),
-            ("Liabilities", e.liabilities),
-            ("Cash Flow", e.cash_flow),
-        ]
-
-        for name, value in metrics:
-            if value is None:
-                analysis.append(
-                    f"{name}: Information was not available in the source documents."
-                )
-            else:
-                analysis.append(
-                    f"{name}: Reported value is {value}. "
-                    f"This metric should be analysed alongside historical performance "
-                    f"and industry benchmarks to assess the company's financial health."
-                )
+        for metric in getattr(e, "metrics", []) or []:
+            if isinstance(metric, dict) and metric.get("value") is not None:
+                analysis.append(f"{metric.get('metric', 'Metric')}: Reported value is {format_financial_value(metric, metric.get('metric'))}.")
 
         return analysis
 
@@ -65,7 +46,7 @@ class FinancialAnalysis:
                 output.append(f"{ratio}: Information not available.")
             else:
                 output.append(
-                    f"{ratio}: {value}\n"
+                    f"{ratio}: {format_financial_value(value, ratio)}\n"
                     f"Interpretation: {meaning}"
                 )
 
@@ -82,13 +63,6 @@ class FinancialAnalysis:
                 "Description": item.description,
             })
 
-        if not risks:
-            risks.append({
-                "Category": "General",
-                "Severity": "Low",
-                "Description": "No major financial risks were identified."
-            })
-
         return risks
 
     @staticmethod
@@ -98,10 +72,10 @@ class FinancialAnalysis:
         opportunities = []
         threats = []
 
-        if report.extraction.net_profit:
+        if report.extraction.net_profit is not None:
             strengths.append("Company is generating profits.")
 
-        if report.extraction.cash_flow:
+        if report.extraction.cash_flow is not None:
             strengths.append("Positive cash flow supports operations.")
 
         if report.red_flags.risks:
@@ -111,10 +85,6 @@ class FinancialAnalysis:
             opportunities.append(
                 "Benchmarking against peers may identify growth opportunities."
             )
-
-        threats.append(
-            "Changing market conditions may impact future financial performance."
-        )
 
         return {
             "Strengths": strengths,

@@ -1,11 +1,15 @@
-# Python bytecode
+# ==============================
+# Python
+# ==============================
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 *.so
 
+# ==============================
 # Virtual environments
+# ==============================
 venv/
 .venv/
 env/
@@ -13,39 +17,53 @@ ENV/
 infosys/
 .Python
 
-# Editor directories
+# ==============================
+# IDE / Editor
+# ==============================
 .vscode/
 .idea/
 
+# ==============================
 # Logs
+# ==============================
 *.log
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
+# ==============================
 # Testing
+# ==============================
 .pytest_cache/
 .coverage
 coverage.xml
 htmlcov/
 
-# Build / packaging
+# ==============================
+# Build / Packaging
+# ==============================
 build/
 dist/
 *.egg-info/
 pip-wheel-metadata/
 
+# ==============================
 # Node / Frontend
+# ==============================
 node_modules/
 .next/
 out/
 
-# OS files
+# ==============================
+# OS
+# ==============================
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ChromaDB and local databases
+# ==============================
+# ChromaDB / Local Databases
+# ==============================
 chroma_db/
 enterprise_chroma_db/
 *.sqlite
@@ -53,13 +71,20 @@ enterprise_chroma_db/
 *.db
 *.db-journal
 
-# Cache / model cache
+# Temporary test databases
+document-agent-text-chunking/tmp_test_db/
+
+# ==============================
+# Cache / Model Cache
+# ==============================
 .cache/
 huggingface/
 hf_cache/
 transformers_cache/
 
-# Runtime-generated artifacts
+# ==============================
+# Runtime Generated Data
+# ==============================
 *.jsonl
 *.parquet
 *.h5
@@ -67,19 +92,39 @@ transformers_cache/
 *.ckpt
 *.model
 
-# Jupyter notebooks
+# ==============================
+# Jupyter
+# ==============================
 .ipynb_checkpoints/
 
-# Environment variables
+# ==============================
+# Environment Variables
+# ==============================
 .env
 .env.*
 
-# Local backup files
+# ==============================
+# Backup Files
+# ==============================
 *~
 *.bak
-.env
-**/.env
 
-__pycache__/
-*.pyc
+# ==============================
+# Temporary Uploads
+# ==============================
 tmp_uploads/
+
+# ==============================
+# Report Agent Generated Output
+# ==============================
+output/*.pdf
+output/charts/*.png
+
+# Temporary generated reports
+tmp_report_*.pdf
+
+# ==============================
+# Generated Pipeline Artifacts
+# ==============================
+backend_pipeline_flow.html
+backend_pipeline_flow.svg

@@ -8,6 +8,7 @@ All charts are saved as PNG images and later embedded into the PDF.
 
 from pathlib import Path
 import matplotlib.pyplot as plt
+import re
 
 from models import ReportData
 
@@ -28,16 +29,29 @@ class ChartGenerator:
         plt.close()
         return filepath
 
+    @staticmethod
+    def _numeric(value):
+        if isinstance(value, dict):
+            if value.get("status") in {"not_found", "unknown", "reported_none"}:
+                return None
+            value = value.get("value") if value.get("value") is not None else value.get("display_value")
+        if isinstance(value, (int, float)):
+            return float(value)
+        match = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", str(value or ""))
+        return float(match.group(0).replace(",", "")) if match else None
+
     def revenue_profit_chart(self, report: ReportData):
 
-        revenue = report.extraction.revenue or 0
-        profit = report.extraction.net_profit or 0
+        values = [("Revenue", self._numeric(report.extraction.revenue)), ("Net Profit", self._numeric(report.extraction.net_profit))]
+        values = [(label, value) for label, value in values if value is not None]
+        if not values:
+            return None
 
         plt.figure(figsize=(6, 4))
 
         plt.bar(
-            ["Revenue", "Net Profit"],
-            [revenue, profit]
+            [label for label, _ in values],
+            [value for _, value in values]
         )
 
         plt.title("Revenue vs Net Profit")
@@ -47,14 +61,16 @@ class ChartGenerator:
 
     def assets_liabilities_chart(self, report: ReportData):
 
-        assets = report.extraction.assets or 0
-        liabilities = report.extraction.liabilities or 0
+        values = [("Assets", self._numeric(report.extraction.assets)), ("Liabilities", self._numeric(report.extraction.liabilities))]
+        values = [(label, value) for label, value in values if value is not None]
+        if not values:
+            return None
 
         plt.figure(figsize=(6, 4))
 
         plt.bar(
-            ["Assets", "Liabilities"],
-            [assets, liabilities]
+            [label for label, _ in values],
+            [value for _, value in values]
         )
 
         plt.title("Assets vs Liabilities")
@@ -64,7 +80,9 @@ class ChartGenerator:
 
     def cash_flow_chart(self, report: ReportData):
 
-        cash = report.extraction.cash_flow or 0
+        cash = self._numeric(report.extraction.cash_flow)
+        if cash is None:
+            return None
 
         plt.figure(figsize=(6, 4))
 
@@ -111,11 +129,14 @@ class ChartGenerator:
             if level in severity:
                 severity[level] += 1
 
+        if not any(severity.values()):
+            return None
+
         plt.figure(figsize=(5, 5))
 
         plt.pie(
-            severity.values(),
-            labels=severity.keys(),
+            [value for value in severity.values() if value > 0],
+            labels=[key for key, value in severity.items() if value > 0],
             autopct="%1.0f%%"
         )
 
@@ -125,15 +146,28 @@ class ChartGenerator:
 
     def company_comparison_chart(self, report: ReportData):
 
-        if not report.comparison.companies:
+        if not report.comparison.companies and not getattr(report.comparison, "records", []):
             return None
 
         companies = []
         revenues = []
+        records = getattr(report.comparison, "records", [])
+        revenue_row = next((row for row in records if str(row.get("metric", "")).lower() == "revenue"), None)
+        if revenue_row:
+            for company in revenue_row.get("companies", []):
+                value = self._numeric(company.get("value"))
+                if value is not None:
+                    revenues.append(value)
+                    companies.append(company.get("company_name", "Company"))
+        else:
+            for company in report.comparison.companies:
+                value = self._numeric(company.revenue)
+                if value is not None:
+                    companies.append(company.company_name)
+                    revenues.append(value)
 
-        for company in report.comparison.companies:
-            companies.append(company.company_name)
-            revenues.append(company.revenue or 0)
+        if len(companies) < 2 or len(revenues) < 2:
+            return None
 
         plt.figure(figsize=(8, 4))
 

@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -37,6 +37,7 @@ from backend.orchestration.contract import (
     ResearchResponse,
 )
 from backend.orchestration.session_store import session_store
+from backend.orchestration.context import AnalysisContext, AnalysisContextStore
 from backend.orchestration.workflow import AnalysisWorkflow
 
 app = FastAPI(
@@ -66,6 +67,9 @@ app.add_middleware(
 )
 
 ALLOWED_EXTENSIONS = {".pdf", ".txt"}
+
+# Compatibility state for the original context-oriented POST endpoints.
+analysis_context_store = AnalysisContextStore()
 
 
 def _json_safe(value: Any) -> Any:
@@ -313,6 +317,7 @@ async def health() -> dict[str, str]:
     status_code=status.HTTP_200_OK,
 )
 async def upload_analysis(
+    request: Request,
     file: UploadFile = File(..., description="Financial report file (PDF or TXT)"),
 ) -> dict[str, Any]:
     if not file or not file.filename or not file.filename.strip():
@@ -334,6 +339,14 @@ async def upload_analysis(
         fh.write(contents)
 
     workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    form = await request.form()
+    legacy_company = form.get("company_name")
+    legacy_year = form.get("report_year")
+    legacy_question = form.get("question")
+    if hasattr(workflow, "ingest_document") and not hasattr(workflow, "run_document_ingestion"):
+        result = await _legacy_ingest_document(workflow, temp_path, safe_name, legacy_company, legacy_year, legacy_question)
+        result["success"] = True
+        return _json_safe(result)
     try:
         doc_result = workflow.run_document_ingestion(
             report_path=temp_path,
@@ -367,6 +380,153 @@ async def upload_analysis(
     )
 
     return _json_safe(doc_result)
+
+
+async def _legacy_ingest_document(
+    workflow: Any,
+    temp_path: str,
+    file_name: str,
+    company_name: Optional[str],
+    report_year: Optional[str],
+    question: Optional[str],
+) -> dict[str, Any]:
+    """Adapt the original context API to the active workflow object."""
+    company = company_name or "Unknown Company"
+    year = report_year or ""
+    result = workflow.ingest_document(temp_path, company, year)
+    metadata = dict(result.get("metadata") or {})
+    analysis_id = str(metadata.get("analysis_id") or uuid4())
+    document_id = str(metadata.get("document_id") or uuid4())
+    metadata.update({"analysis_id": analysis_id, "document_id": document_id, "company_name": company, "report_year": _coerce_report_year(year)})
+    context = AnalysisContext(
+        analysis_id=analysis_id,
+        document_id=document_id,
+        company_name=str(metadata.get("company_name") or company),
+        report_year=str(metadata.get("report_year") or year),
+        question=question or "",
+        document_path=temp_path,
+        metadata=metadata,
+        document={"source_file": file_name},
+        chunks=result.get("chunks") or [],
+    )
+    analysis_context_store.create(context)
+    payload = dict(result)
+    payload.update({"analysis_id": analysis_id, "document_id": document_id, "metadata": metadata})
+    return payload
+
+
+@app.post("/analysis/document")
+async def legacy_document_endpoint(
+    file: UploadFile = File(...),
+    company_name: Optional[str] = Form(None),
+    report_year: Optional[str] = Form(None),
+    question: Optional[str] = Form(None),
+) -> dict[str, Any]:
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="Document is required")
+    temp_dir = "./tmp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    safe_name = os.path.basename(file.filename)
+    temp_path = os.path.join(temp_dir, f"legacy_{safe_name}")
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    with open(temp_path, "wb") as fh:
+        fh.write(contents)
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    if hasattr(workflow, "ingest_document"):
+        return _json_safe(await _legacy_ingest_document(workflow, temp_path, safe_name, company_name, report_year, question))
+    result = workflow.run_document_ingestion(report_path=temp_path)
+    return _json_safe(result)
+
+
+@app.post("/analysis/extraction")
+async def legacy_extraction_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    analysis_id = payload.get("analysis_id")
+    if analysis_id:
+        try:
+            context = analysis_context_store.require(str(analysis_id))
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if hasattr(workflow, "extract_context"):
+            result = workflow.extract_context(context)
+        else:
+            result = workflow.run_extraction(analysis_id=context.analysis_id, company_name=context.company_name, document_id=context.document_id)
+        context.extraction = result
+        analysis_context_store.save(context)
+        return _json_safe(result)
+    text = payload.get("text", "")
+    metadata = payload.get("metadata") or {}
+    if hasattr(workflow, "extract_metrics"):
+        return _json_safe(workflow.extract_metrics(text, metadata))
+    raise HTTPException(status_code=400, detail="analysis_id or text is required")
+
+
+@app.post("/analysis/red-flags")
+async def legacy_red_flags_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    context = analysis_context_store.require(str(payload["analysis_id"])) if payload.get("analysis_id") else None
+    company = context.company_name if context else payload.get("company_name", "Unknown Company")
+    chunks = context.chunks if context else payload.get("context_chunks", [])
+    if context and hasattr(workflow, "red_flags_for_context"):
+        result = workflow.red_flags_for_context(context)
+        context.red_flags = result
+        analysis_context_store.save(context)
+    else:
+        result = workflow.analyze_red_flags(company, chunks)
+    return _json_safe(result)
+
+
+@app.post("/analysis/research")
+async def legacy_research_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    context = analysis_context_store.require(str(payload["analysis_id"])) if payload.get("analysis_id") else None
+    question = payload.get("question", "")
+    if context and hasattr(workflow, "research_for_context"):
+        result = workflow.research_for_context(context, question, payload.get("top_k", 5))
+        context.research = result
+        analysis_context_store.save(context)
+    else:
+        result = workflow.research(question, payload.get("company_name", "Unknown Company"), payload.get("top_k", 5))
+    return _json_safe(result)
+
+
+@app.post("/analysis/comparison")
+async def legacy_comparison_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    if payload.get("analysis_ids"):
+        inputs = []
+        for analysis_id in payload["analysis_ids"]:
+            context = analysis_context_store.require(str(analysis_id))
+            inputs.append(workflow.comparison_input(context) if hasattr(workflow, "comparison_input") else context.model_dump())
+        result = workflow.compare_companies(inputs)
+    elif payload.get("analysis_id"):
+        context = analysis_context_store.require(str(payload["analysis_id"]))
+        result = workflow.compare_companies([workflow.comparison_input(context) if hasattr(workflow, "comparison_input") else context.model_dump()])
+    else:
+        result = workflow.compare_companies(payload.get("companies", []))
+    if payload.get("analysis_id"):
+        context = analysis_context_store.require(str(payload["analysis_id"]))
+        context.comparison = result
+        analysis_context_store.save(context)
+    return _json_safe(result)
+
+
+@app.post("/analysis/report")
+async def legacy_report_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    workflow = AnalysisWorkflow(collection_name="financial_research_v1")
+    if payload.get("analysis_id"):
+        context = analysis_context_store.require(str(payload["analysis_id"]))
+        if hasattr(workflow, "generate_report"):
+            result = workflow.generate_report(context.extraction, context.research, context.red_flags, context.comparison, context.metadata)
+        else:
+            result = workflow.run_report(analysis_id=context.analysis_id, company_name=context.company_name, report_year=context.report_year, document_id=context.document_id)
+        context.report = result
+        analysis_context_store.save(context)
+        return _json_safe(result)
+    result = workflow.generate_report(payload.get("extraction", {}), payload.get("research", {}), payload.get("red_flags", {}), payload.get("comparison", {}), payload.get("metadata", {}))
+    return _json_safe(result)
 
 
 @app.get(

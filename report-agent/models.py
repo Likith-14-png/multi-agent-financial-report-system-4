@@ -9,7 +9,7 @@ and Research Agent.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # -------------------------------------------------
@@ -27,17 +27,32 @@ class ExtractionData:
     business_model: Optional[str] = None
     market_position: Optional[str] = None
 
-    revenue: Optional[float] = None
-    net_profit: Optional[float] = None
-    eps: Optional[float] = None
-    operating_margin: Optional[float] = None
-    gross_margin: Optional[float] = None
-    ebitda: Optional[float] = None
-    assets: Optional[float] = None
-    liabilities: Optional[float] = None
-    cash_flow: Optional[float] = None
+    revenue: Optional[Any] = None
+    net_profit: Optional[Any] = None
+    eps: Optional[Any] = None
+    operating_margin: Optional[Any] = None
+    gross_margin: Optional[Any] = None
+    ebitda: Optional[Any] = None
+    assets: Optional[Any] = None
+    liabilities: Optional[Any] = None
+    cash_flow: Optional[Any] = None
+    total_debt: Optional[Any] = None
+    debt_to_equity: Optional[Any] = None
+    net_margin: Optional[Any] = None
+    material_weakness: Optional[Dict[str, Any]] = None
 
-    financial_ratios: Dict[str, float] = field(default_factory=dict)
+    financial_ratios: Dict[str, Any] = field(default_factory=dict)
+    metrics: List[Dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.metrics:
+            return
+        excluded = {"company_name", "industry", "business_model", "market_position", "material_weakness", "financial_ratios", "metrics"}
+        self.metrics = [
+            {"metric": key.replace("_", " ").title(), "value": value}
+            for key, value in self.__dict__.items()
+            if key not in excluded and value is not None
+        ]
 
 
 # -------------------------------------------------
@@ -53,6 +68,11 @@ class RiskItem:
     category: str
     description: str
     severity: str
+    title: Optional[str] = None
+    evidence: Any = None
+    source: Optional[str] = None
+    source_page: Optional[Any] = None
+    source_chunk: Optional[str] = None
 
 
 @dataclass
@@ -76,13 +96,13 @@ class CompanyComparison:
 
     company_name: str
 
-    revenue: Optional[float] = None
-    net_profit: Optional[float] = None
-    operating_margin: Optional[float] = None
-    debt: Optional[float] = None
-    cash_flow: Optional[float] = None
+    revenue: Optional[Any] = None
+    net_profit: Optional[Any] = None
+    operating_margin: Optional[Any] = None
+    debt: Optional[Any] = None
+    cash_flow: Optional[Any] = None
 
-    ratios: Dict[str, float] = field(default_factory=dict)
+    ratios: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +112,7 @@ class ComparisonData:
     """
 
     companies: List[CompanyComparison] = field(default_factory=list)
+    records: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # -------------------------------------------------
@@ -108,6 +129,9 @@ class ResearchItem:
     answer: str
     evidence: str
     source: str
+    source_page: Optional[Any] = None
+    source_chunk: Optional[str] = None
+    citation: Optional[str] = None
 
 
 # -------------------------------------------------

@@ -67,5 +67,7 @@ with tab2:
         parsed = agent.load_from_extraction_output(sample_payload)
         result = agent.compare_companies(parsed)
         st.success("Comparison Generated for Report Agent!")
+        rows = result.get("comparison_table") or result.get("records") or result.get("metrics") or []
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
         st.json(result)
         # Comparison Agent module

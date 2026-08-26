@@ -1177,6 +1177,18 @@ class DocumentAgent:
                 return False
             words = normalized.split()
             haystack = f"{normalized} {line}".lower()
+            blocked_financial_terms = (
+                "million", "billion", "thousand", "crore", "lakh", "percent", "percentage",
+                "revenue", "sales", "income", "profit", "loss", "assets", "liabilities",
+                "equity", "debt", "cash flow", "margin", "balance sheet", "income statement",
+                "financial statement", "table", "metric", "primary unit", "currency",
+            )
+            if any(term in haystack for term in blocked_financial_terms):
+                return False
+            if re.fullmatch(r"(?:[$€£₹]|usd|inr|eur|gbp|jpy)?\s*[-+]?\d[\d,]*(?:\.\d+)?%?", normalized, re.I):
+                return False
+            if re.fullmatch(r"(?:19|20)\d{2}", normalized):
+                return False
             if normalized.lower().startswith(("for ", "to ")):
                 return False
             if len(words) > 8:
@@ -1304,6 +1316,22 @@ class DocumentAgent:
                     add_candidate(value, "document_metadata", value, -1)
 
         cover = self._top_text_evidence(text, pages or [])
+
+        # Explicit entity fields outrank all title, header, and metadata candidates.
+        cover_lines = [_clean_line(line) for line in cover.splitlines() if _clean_line(line)]
+        explicit_labels = re.compile(
+            r"^(?:company|company name|legal entity|registered name|issuer|issuer name|registrant|registrant name)\s*[:\-]?\s*(.*)$",
+            re.I,
+        )
+        for index, line in enumerate(cover_lines[:80]):
+            explicit_match = explicit_labels.match(line)
+            candidate_value = explicit_match.group(1).strip() if explicit_match else ""
+            if not candidate_value and explicit_match and index + 1 < len(cover_lines):
+                candidate_value = cover_lines[index + 1]
+            candidate_value = _normalize_candidate(candidate_value)
+            if _is_company_candidate(candidate_value, "issuer", line):
+                return candidate_value
+
         for candidate in _title_candidates(cover):
             add_candidate(candidate["value"], candidate["source"], candidate["line"], candidate["index"])
 

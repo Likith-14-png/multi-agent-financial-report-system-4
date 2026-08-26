@@ -56,6 +56,21 @@ def test_invalid_api_key_falls_back():
     assert result["model_used"] == "offline-fallback"
 
 
+def test_missing_model_falls_back_without_retries(monkeypatch):
+    service = GeminiService(api_key="test-key", model_name="retired-model")
+    service.client = MagicMock()
+    service.client.models.generate_content.side_effect = genai_errors.ClientError(
+        code=404,
+        response_json={"error": {"message": "model retired-model is no longer available"}},
+    )
+    monkeypatch.setattr("app.services.gemini_service.time.sleep", lambda _seconds: (_ for _ in ()).throw(AssertionError("permanent model errors must not sleep")))
+
+    result = service.analyze("Analyze", [{"document": "Revenue fell", "metadata": {"page": 1}}])
+
+    assert result["model_used"] == "offline-fallback"
+    assert service.client.models.generate_content.call_count == 1
+
+
 def test_network_failure_falls_back():
     service = GeminiService(api_key="test-key")
     service.client = MagicMock()

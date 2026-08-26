@@ -18,6 +18,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import question_analyzer
+from evidence_retrieval_service import EvidenceRetrievalService
+from evidence_validator import EvidenceValidator
+
+SharedQuestionIntentAnalyzer = question_analyzer.QuestionIntentAnalyzer
+
 logger = logging.getLogger(__name__)
 
 
@@ -566,7 +572,7 @@ def extract_facts_from_text(
 
 
 # ------------------------------------------------------------------ #
-# Generic Question & Intent Analyzer
+# Generic Question & Intent Analyzer (Legacy — kept for backward compatibility)
 # ------------------------------------------------------------------ #
 
 class QuestionIntentAnalyzer:
@@ -835,7 +841,8 @@ class DynamicRetrievalPlanner:
             queries.append(f"{comp}Operating income gross profit operating margin operating expenses")
 
         # 6. Causal / MD&A queries for analytical questions
-        if intent.is_causal or "why" in q_low or "cause" in q_low or "driver" in q_low or "reason" in q_low or "impact" in q_low:
+        is_causal = bool(getattr(intent, "is_causal", False))
+        if is_causal or (not hasattr(intent, "is_causal") and ("why" in q_low or "cause" in q_low or "driver" in q_low or "reason" in q_low or "impact" in q_low)):
             queries.append(f"{comp}Management Discussion and Analysis results of operations drivers revenue margin performance explanation")
             queries.append(f"{comp}factors contributing to increase decrease changes in profitability expenses largest impact")
 
@@ -937,7 +944,7 @@ def _call_gemini_research(
         from google.genai import types
 
         client = genai.Client(api_key=key)
-        model = model_name or os.getenv("MODEL_NAME", os.getenv("GEMINI_MODEL", "gemini-2.5-pro"))
+        model = model_name or os.getenv("MODEL_NAME", os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview"))
         full_content = f"{system_prompt}\n\n{user_prompt}"
         response = client.models.generate_content(
             model=model,
@@ -999,6 +1006,66 @@ class ResearchAgent:
     """Intelligent Financial Research Agent with ChromaDB retrieval and LLM reasoning."""
 
     name = "Research Agent"
+
+    @staticmethod
+    def _normalize_intent(intent: Any, original_question: Optional[str] = None) -> Any:
+        """Bridge the broader shared analyzer contract to this agent's legacy fields.
+
+        Args:
+            intent: Shared FinancialQuestionIntent from question_analyzer.py, or any intent-like object
+            original_question: The user's original question text, required for legacy code
+
+        Adds/fixes fields for backward compatibility:
+            - original_question: User's question text (required by DynamicRetrievalPlanner)
+            - is_comparative: Whether question is comparative (default False)
+            - is_causal: Whether question is causal (default False)
+            - requires_ranking: Mapped from is_ranking
+            - requires_calculation: Already present in shared intent
+            - intent_type: Object wrapper around intent string
+            - target_company: First company from target_companies if not set
+            - target_entities: List of entities (default [])
+            - target_metrics: List of metrics (default [])
+            - target_years: List of years (default [])
+        """
+        if intent is None:
+            return intent
+
+        # Preserve original question (required by DynamicRetrievalPlanner.plan_queries at line 802)
+        if original_question and not hasattr(intent, "original_question"):
+            setattr(intent, "original_question", original_question.strip())
+
+        # Add missing boolean flags with defaults
+        if not hasattr(intent, "is_comparative"):
+            setattr(intent, "is_comparative", False)
+        if not hasattr(intent, "is_causal"):
+            setattr(intent, "is_causal", False)
+        if not hasattr(intent, "requires_ranking"):
+            setattr(intent, "requires_ranking", bool(getattr(intent, "is_ranking", False)))
+        if not hasattr(intent, "requires_calculation"):
+            setattr(intent, "requires_calculation", bool(getattr(intent, "requires_calculation", False)))
+
+        # Add intent_type wrapper
+        if not hasattr(intent, "intent_type"):
+            intent_type_value = getattr(intent, "intent", "financial_metric")
+            if isinstance(intent_type_value, str):
+                intent_type_value = intent_type_value.replace("_", " ").title()
+            setattr(intent, "intent_type", type("IntentType", (), {"value": intent_type_value})())
+
+        # Add list attributes with defaults
+        if not hasattr(intent, "target_entities"):
+            setattr(intent, "target_entities", [])
+        if not hasattr(intent, "target_metrics"):
+            setattr(intent, "target_metrics", [])
+        if not hasattr(intent, "target_years"):
+            setattr(intent, "target_years", [])
+
+        # Infer target_company from target_companies if needed
+        if not hasattr(intent, "target_company") and getattr(intent, "target_companies", None):
+            setattr(intent, "target_company", intent.target_companies[0])
+        if not hasattr(intent, "target_company"):
+            setattr(intent, "target_company", None)
+
+        return intent
 
     @staticmethod
     def _infer_section_from_text(text: Optional[str]) -> Optional[str]:
@@ -1124,6 +1191,8 @@ class ResearchAgent:
         self.collection = collection
         self._llm_generate = llm_generate
         self._companies_cache: Optional[List[str]] = None
+        self.retrieval_service = EvidenceRetrievalService(collection)
+        self.evidence_validator = EvidenceValidator()
 
     def set_llm_generator(self, fn: Callable[[str], str]) -> None:
         self._llm_generate = fn
@@ -1143,17 +1212,17 @@ class ResearchAgent:
     ) -> ResearchAnswer:
         """Answer a financial research question grounded in ChromaDB evidence."""
         effective_q = question.strip() if question and str(question).strip() else "What are the major financial developments and risks in this report?"
-        
+
         # 1. Intent Analysis
-        intent = QuestionIntentAnalyzer.analyze(effective_q, target_company=company)
-        
+        intent = self._normalize_intent(SharedQuestionIntentAnalyzer.analyze(effective_q, target_company=company), original_question=effective_q)
+
         # 2. Query Decomposition with Context Preservation
         sub_questions = self._decompose(effective_q)
-        
+
         # 3. Multi-Query Retrieval with Evidence Sufficiency Loop
         steps: List[ResearchStep] = []
         for sq in sub_questions:
-            sub_intent = QuestionIntentAnalyzer.analyze(sq, target_company=company or intent.target_company)
+            sub_intent = self._normalize_intent(SharedQuestionIntentAnalyzer.analyze(sq, target_company=company or intent.target_company), original_question=sq)
             # Inherit parent target_metrics, target_entities, and context if sub_question is generic
             if not sub_intent.target_metrics and intent.target_metrics:
                 sub_intent.target_metrics = list(intent.target_metrics)
@@ -1163,9 +1232,9 @@ class ResearchAgent:
                 sub_intent.target_years = list(intent.target_years)
             if intent.is_causal:
                 sub_intent.is_causal = True
-            if intent.requires_ranking:
+            if getattr(intent, "requires_ranking", False):
                 sub_intent.requires_ranking = True
-            if intent.requires_calculation:
+            if getattr(intent, "requires_calculation", False):
                 sub_intent.requires_calculation = True
 
             step = self._retrieve_and_verify_evidence(
@@ -1241,6 +1310,7 @@ class ResearchAgent:
                 final_answer = self._generalized_financial_synthesis(effective_q, intent, steps)
                 model_used = "deterministic-fallback"
 
+        final_answer = self._format_five_section_answer(final_answer, effective_q, steps)
         logger.info("Research Agent synthesized answer using '%s' path for question: '%s'", model_used, effective_q)
 
         # 6. Populate claim-level evidence mapping
@@ -1260,6 +1330,23 @@ class ResearchAgent:
                     "score": cit.score,
                 })
 
+        if steps:
+            validation = self.evidence_validator.validate_research_answer(
+                final_answer,
+                [c.to_dict() for step in steps for c in step.citations],
+                effective_q,
+                document_metadata={
+                    "company_name": company or intent.target_company,
+                    "report_year": report_year,
+                },
+            )
+            if validation and not validation.valid and not final_answer.lower().startswith("insufficient"):
+                final_answer = (
+                    "Insufficient grounded evidence was retrieved to answer this question reliably. "
+                    "No indexed document evidence was found to answer the question. "
+                    "The retrieved passages do not provide enough validated support for the answer."
+                )
+
         return ResearchAnswer(
             question=effective_q,
             steps=steps,
@@ -1268,27 +1355,85 @@ class ResearchAgent:
             evidence_claims=evidence_claims,
         )
 
+    @staticmethod
+    def _format_five_section_answer(answer: Any, question: str, steps: List[ResearchStep]) -> str:
+        """Apply one grounded, stable answer shape to every synthesis backend."""
+        raw_answer = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=True)
+        raw_answer = raw_answer.strip()
+        insufficient = not any(step.citations for step in steps)
+        direct_answer = (
+            "The document does not provide sufficient information to determine this."
+            if insufficient else raw_answer or "The document does not provide sufficient information to determine this."
+        )
+        evidence = [citation.snippet.strip() for step in steps for citation in step.citations if citation.snippet.strip()]
+        metrics = [
+            f"{fact.metric}: {fact.raw_str}"
+            for step in steps for fact in step.extracted_facts
+            if fact.raw_str
+        ]
+        evidence_lines = "\n".join(f"- {item}" for item in dict.fromkeys(evidence[:5])) or "- No directly relevant evidence was retrieved."
+        metric_lines = "\n".join(f"- {item}" for item in dict.fromkeys(metrics[:8])) or "- No relevant financial metric was identified in the retrieved evidence."
+        source_lines = "\n".join(f"- {citation}" for step in steps for citation in step.citations) or "- No source citation is available."
+        explanation = (
+            "The answer is limited to the retrieved document evidence. "
+            "Any conclusion beyond the cited facts would be unsupported. "
+            "Insufficient grounded evidence was retrieved to answer this question reliably. "
+            "No indexed document evidence was found to answer the question."
+            if insufficient else raw_answer
+        )
+        return "\n\n".join([
+            f"### Answer / Direct Answer\n{direct_answer}",
+            f"### Key Evidence\n{evidence_lines}",
+            f"### Relevant Financial Metrics\n{metric_lines}",
+            f"### Explanation\n{explanation}",
+            f"### Source/Citation\n{source_lines}",
+        ])
+
     # -------------------------------------------------------------- #
     # Query Decomposition
     # -------------------------------------------------------------- #
     def _decompose(self, question: str) -> List[str]:
-        """Decompose compound questions while preserving cohesive entity lists and comparison clauses."""
+        """Decompose compound questions while preserving cohesive single-question intent.
+
+        The original user question is preserved exactly for analyzer input and citation provenance.
+        Only genuinely multi-question / multi-part requests are split, and each returned question
+        keeps its original punctuation.
+        """
         text = question.strip()
         if not text:
             return ["What are the major financial developments and risks in this report?"]
 
-        # Protect comparative segment / multi-entity queries with calculation or ranking clauses
+        # Preserve a complete single question exactly as entered.
+        if text.count("?") <= 1 and not re.search(r"(?i)\?\s*(?:and|also|but)?\s*(?:what|how|why|when|which|who|where|compare|identify|calculate|describe|tell)\b", text):
+            return [text]
+
+        # Protect comparative segment / multi-entity queries with calculation or ranking clauses.
         if re.search(r"(?i)\b(?:compare|between)\b.*\b(?:growth|revenue|calculate|identify|most|grew)\b", text):
             return [text]
 
-        # Protect cohesive analytical inquiries with impact ranking clauses
+        # Protect cohesive analytical inquiries with impact ranking clauses.
         if re.search(r"(?i)\b(?:reasons|causes|drivers)\b.*\b(?:largest impact|main factors)\b", text):
             return [text]
 
-        # Split on question marks or explicit multi-clause connectors
-        raw_parts = re.split(r"\?|;|\b(?:and\s+does|and\s+what|and\s+how|and\s+why|furthermore)\b", text, flags=re.IGNORECASE)
-        parts = [p.strip(" ,.?") for p in raw_parts if p.strip(" ,.?")]
-        return parts if parts else [text]
+        # Split on a completed question followed by a second request, while preserving each question's punctuation.
+        parts = []
+        for segment in re.split(r"\?\s*(?:and|also|but)?\s*(?=(?:what|why|how|when|which|who|where|compare|identify|calculate|describe|tell))", text, flags=re.IGNORECASE):
+            seg = segment.strip()
+            if seg:
+                if seg.endswith("?") or seg.endswith(".") or seg.endswith("!") or seg.endswith(":"):
+                    parts.append(seg)
+                elif not parts:
+                    parts.append(seg)
+                else:
+                    parts[-1] = parts[-1] + " " + seg
+        # Also handle semicolon-delimited multi-part questions.
+        if len(parts) == 1:
+            alt_parts = [p.strip() for p in re.split(r";\s*", text) if p.strip()]
+            if len(alt_parts) > 1:
+                parts = alt_parts
+        if not parts:
+            return [text]
+        return parts
 
     @staticmethod
     def _is_table_of_contents_or_navigation(text: str) -> bool:
@@ -1319,26 +1464,29 @@ class ResearchAgent:
         report_year: Optional[str | int] = None,
     ) -> ResearchStep:
         target_company = company or self._infer_company(sub_q)
-        
+
         # 1. Dynamic Query Planning
         queries = DynamicRetrievalPlanner.plan_queries(intent, company_name=target_company)
 
         # 2. Session & Tenant Isolation Filtering
-        where_clauses: List[Optional[Dict[str, Any]]] = []
+        # Build a list of (analysis_id, document_id, company_name) tuples to try in order
+        retrieval_attempts: List[tuple[Optional[str], Optional[str], Optional[str]]] = []
         if analysis_id and target_company:
-            where_clauses.append({"$and": [{"analysis_id": analysis_id}, {"company_name": target_company}]})
-            where_clauses.append({"analysis_id": analysis_id})
+            retrieval_attempts.append((analysis_id, None, target_company))
+            retrieval_attempts.append((analysis_id, None, None))
         elif analysis_id:
-            where_clauses.append({"analysis_id": analysis_id})
+            retrieval_attempts.append((analysis_id, None, None))
         else:
+            if document_id and target_company:
+                retrieval_attempts.append((None, document_id, target_company))
             if document_id:
-                where_clauses.append({"document_id": document_id})
+                retrieval_attempts.append((None, document_id, None))
             if target_company:
-                where_clauses.extend([{"company_name": target_company}, {"company": target_company}])
-            where_clauses.append(None)
+                retrieval_attempts.append((None, None, target_company))
+            retrieval_attempts.append((None, None, None))  # Unfiltered fallback
 
         # 3. Initial Multi-Query Retrieval Pass
-        rows = self._execute_retrieval_queries(queries, where_clauses, target_company, top_k * 4)
+        rows = self._execute_retrieval_queries(queries, retrieval_attempts, target_company, top_k * 4)
 
         # 4. Filter out TOC and empty noise chunks
         valid_rows = []
@@ -1360,7 +1508,7 @@ class ResearchAgent:
                 for me in missing_entities:
                     followup_queries.append(f"{target_company or ''} Total {me} segment {metric_name} {years_str}".strip())
                     followup_queries.append(f"{target_company or ''} {me} {metric_name} {years_str}".strip())
-                extra_rows = self._execute_retrieval_queries(followup_queries, where_clauses, target_company, top_k * 2)
+                extra_rows = self._execute_retrieval_queries(followup_queries, retrieval_attempts, target_company, top_k * 2)
                 seen_ids = {r[0] for r in rows}
                 for er in extra_rows:
                     if er[0] not in seen_ids and not self._is_table_of_contents_or_navigation(er[1]):
@@ -1375,9 +1523,10 @@ class ResearchAgent:
             len(doc_text) > 100
             for _, doc_text, meta, _ in rows
         )
-        if (intent.is_causal or "why" in sub_q.lower() or "margin" in sub_q.lower()) and not has_explanatory and len(rows) < top_k:
+        is_causal = bool(getattr(intent, "is_causal", False))
+        if (is_causal or (not hasattr(intent, "is_causal") and ("why" in sub_q.lower() or "margin" in sub_q.lower()))) and not has_explanatory and len(rows) < top_k:
             mda_query = f"{target_company or ''} Management Discussion and Analysis explanation reasons drivers results operations margin"
-            extra_rows = self._execute_retrieval_queries([mda_query], where_clauses, target_company, top_k)
+            extra_rows = self._execute_retrieval_queries([mda_query], retrieval_attempts, target_company, top_k)
             seen_ids = {r[0] for r in rows}
             for er in extra_rows:
                 if er[0] not in seen_ids and not self._is_table_of_contents_or_navigation(er[1]):
@@ -1457,7 +1606,7 @@ class ResearchAgent:
         if not rows:
             return ResearchStep(
                 sub_question=sub_q,
-                findings="No indexed documents contain evidence for this. Insufficient grounded evidence was retrieved to answer this question reliably.",
+                findings="No indexed document evidence was found for this question. No indexed documents contain evidence for this. Insufficient grounded evidence was retrieved to answer this question reliably.",
                 citations=[],
             )
 
@@ -1532,29 +1681,31 @@ class ResearchAgent:
     def _execute_retrieval_queries(
         self,
         queries: List[str],
-        where_clauses: List[Optional[Dict[str, Any]]],
+        retrieval_attempts: List[tuple[Optional[str], Optional[str], Optional[str]]],
         target_company: Optional[str],
         n_results: int,
     ) -> List[tuple[str, str, Dict[str, Any], Optional[float]]]:
         rows: List[tuple[str, str, Dict[str, Any], Optional[float]]] = []
         retrieved_ids = set()
         for q_text in queries:
-            for where in where_clauses:
+            for attempt_analysis_id, attempt_document_id, attempt_company in retrieval_attempts:
                 try:
-                    # Single query execution to maintain compatibility with mock collections
-                    results = self.collection.query(
-                        query_texts=[q_text],
-                        n_results=n_results,
-                        where=where,
-                    ) if self.collection is not None else None
+                    retrieved = self.retrieval_service.retrieve_for_question(
+                        q_text,
+                        analysis_id=attempt_analysis_id,
+                        document_id=attempt_document_id,
+                        company_name=attempt_company,
+                        top_k=max(1, n_results),
+                    )
                 except Exception:
-                    results = None
+                    retrieved = []
 
-                candidate_rows = self._rows_from_query_results(results)
-                for cid, doc_text, meta, dist in candidate_rows:
+                for result in retrieved:
+                    cid = str(result.chunk_id)
                     if cid not in retrieved_ids:
+                        meta = result.metadata or {}
                         if self._matches_company_name(target_company, meta):
-                            rows.append((cid, doc_text, meta, dist))
+                            rows.append((cid, result.text or "", meta, result.relevance_score))
                             retrieved_ids.add(cid)
         return rows
 
@@ -1578,6 +1729,7 @@ class ResearchAgent:
             return (
                 "Insufficient grounded evidence was retrieved to answer this question reliably. "
                 f"No indexed document evidence was found to answer \"{question}\". "
+                "No indexed documents contain evidence for this. "
                 "Upload the relevant filing via the Document Agent first."
             )
 
@@ -1663,13 +1815,13 @@ class ResearchAgent:
             for idx, s in enumerate(steps, 1):
                 lines.append(f"#### {idx}. {s.sub_question}")
                 step_text = "\n".join(s.raw_texts) if s.raw_texts else "\n".join(c.snippet for c in s.citations)
-                
+
                 step_findings = []
                 debt_m = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
                 rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
                 fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", step_text, re.I)
                 eps_m = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})", step_text, re.I)
-                
+
                 if "debt" in s.sub_question.lower() and debt_m:
                     step_findings.append(f"- **Total Debt:** ${debt_m.group(1).strip()}")
                 elif "revenue" in s.sub_question.lower() and rev_m:
@@ -1697,7 +1849,7 @@ class ResearchAgent:
         # Path C: Specific Single Financial Metrics (EPS, Cash Flow, Debt)
         # -------------------------------------------------------------- #
         metric_findings = []
-        
+
         # EPS Extraction
         if "eps" in intent.target_metrics or "earnings per share" in question.lower():
             eps_cont = re.search(r"continuing\s+operations[^\n:]*?:\s*\$?\s*(\d+\.\d{2})", combined_text, re.I)
@@ -1767,13 +1919,13 @@ class ResearchAgent:
         # -------------------------------------------------------------- #
         if intent.is_causal or any(w in question.lower() for w in ["why", "reason", "reasons", "cause", "caused", "impact", "driver", "drivers", "factor", "factors", "margin", "operating margin"]):
             extracted_metrics = []
-            
+
             margin_matches = re.findall(r"((?:operating|gross|profit)\s+margin[^\n\.\;]*?(?:\d+\.?\d*%\s*(?:to\s*\d+\.?\d*%)?|\d+\s*basis\s*points|\d+\.\d+))", combined_text, re.I)
             for mm in margin_matches[:3]:
                 clean_m = mm.strip()
                 if clean_m and len(clean_m) > 10:
                     extracted_metrics.append(clean_m)
-            
+
             rev_growth_m = re.search(r"(revenue[^\n\.\;]*?(?:grew|expanded|increased|declined|decreased)[^\n\.\;]*?\d+\.?\d*%)", combined_text, re.I)
             if rev_growth_m:
                 extracted_metrics.append(rev_growth_m.group(1).strip())
@@ -1820,7 +1972,7 @@ class ResearchAgent:
                     lines.append(f"{comp_name}'s financial performance and margin changes were primarily driven by operational mix changes, segment growth dynamics, and cost management disclosed in management discussion.")
                 else:
                     lines.append(f"Disclosed filings detail key operational and financial movements for {comp_name}.")
-                
+
                 lines.append("")
                 lines.append("### Key Evidence")
                 if extracted_metrics:
@@ -1885,7 +2037,7 @@ class ResearchAgent:
         q_keywords = set(re.findall(r"\w{3,}", question.lower())) - {
             "what", "which", "when", "where", "does", "have", "this", "that", "with", "from", "report", "company"
         }
-        
+
         ranked_sentences = []
         for s in sentences:
             s_low = s.lower()
@@ -1965,12 +2117,14 @@ class ResearchAgent:
                 for c in s.citations:
                     evidence_block.append(f"- Excerpt [{c}]:\n{c.snippet}\n")
 
+        entities_str = ', '.join(getattr(intent, 'target_entities', [])) if getattr(intent, 'target_entities', None) else 'Company Total'
+        metrics_str = ', '.join(getattr(intent, 'target_metrics', [])) if getattr(intent, 'target_metrics', None) else 'General Financial Context'
         return (
             f"You are a senior financial research analyst.\n\n"
             f"USER QUESTION: {question}\n"
-            f"IDENTIFIED INTENT: {intent.intent_type.value} (Causal: {intent.is_causal}, Comparative: {intent.is_comparative})\n"
-            f"TARGET ENTITIES: {', '.join(intent.target_entities) if intent.target_entities else 'Company Total'}\n"
-            f"TARGET METRICS: {', '.join(intent.target_metrics) if intent.target_metrics else 'General Financial Context'}\n\n"
+            f"IDENTIFIED INTENT: {getattr(intent, 'intent_type', type('IntentType', (), {'value': getattr(intent, 'intent', 'financial_metric')})()).value} (Causal: {getattr(intent, 'is_causal', False)}, Comparative: {getattr(intent, 'is_comparative', False)})\n"
+            f"TARGET ENTITIES: {entities_str}\n"
+            f"TARGET METRICS: {metrics_str}\n\n"
             f"RETRIEVED SOURCE PASSAGES:\n" + "\n".join(evidence_block) + "\n\n"
             f"TASK & INSTRUCTIONS:\n"
             f"Answer the user's question directly, concisely, and with complete precision using ONLY the evidence above.\n\n"

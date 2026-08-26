@@ -7,6 +7,51 @@ Generates professional report text for the Report Agent.
 from datetime import datetime
 from models import ReportData
 
+_CURRENCY_SYMBOLS = {
+    "INR": "₹",
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+}
+
+
+def format_financial_value(value, metric=None) -> str:
+    """Format structured or legacy financial values for report display."""
+    if value is None:
+        return ""
+    metadata = value if isinstance(value, dict) else {}
+    nested_value = metadata.get("value") if isinstance(metadata.get("value"), dict) else None
+    if nested_value:
+        metadata = {**metadata, **nested_value}
+    metric_text = str(metric or metadata.get("metric") or "").casefold()
+    numeric = metadata.get("numeric_value", metadata.get("value"))
+    currency = str(metadata.get("currency") or "").upper()
+    unit = str(metadata.get("unit") or metadata.get("unit_scale") or "").casefold().replace(" ", "_")
+    if numeric is None and not metadata:
+        return str(value).strip()
+    if numeric is None:
+        return str(metadata.get("display_value") or "Not reported")
+    try:
+        number = float(numeric)
+    except (TypeError, ValueError):
+        if isinstance(numeric, (dict, list, tuple, set)):
+            return str(metadata.get("display_value") or "Not reported")
+        return str(metadata.get("display_value") or numeric)
+    if unit in {"percent", "%"} or "margin" in metric_text or "growth" in metric_text:
+        return f"{number:g}%"
+    if unit in {"x", "ratio", "multiple"} or "ratio" in metric_text or "debt/equity" in metric_text:
+        return f"{number:g}x"
+    if unit == "per_share" or metric_text in {"eps", "basic eps", "diluted eps", "trend eps"}:
+        return f"{_CURRENCY_SYMBOLS.get(currency, '')}{number:.2f} per share"
+    if unit == "days":
+        return f"{number:g} days"
+    sign = "-" if number < 0 else ""
+    formatted = f"{abs(number):,.2f}".rstrip("0").rstrip(".")
+    symbol = _CURRENCY_SYMBOLS.get(currency, "")
+    suffix = f" {unit}" if unit and unit not in {"units", "unitless"} else (" units" if unit in {"units", "unitless"} else "")
+    return f"{sign}{symbol}{formatted}{suffix}"
+
 
 class ReportFormatter:
     """
@@ -16,14 +61,9 @@ class ReportFormatter:
     @staticmethod
     def current_date() -> str:
         return datetime.now().strftime("%d %B %Y")
-
     @staticmethod
     def executive_summary(report: ReportData) -> str:
         company = report.extraction.company_name
-
-        revenue = report.extraction.revenue
-        profit = report.extraction.net_profit
-        operating_margin = report.extraction.operating_margin
 
         summary = (
             f"{company} has been analysed using the Multi-Agent Financial "
@@ -32,30 +72,12 @@ class ReportFormatter:
             f"to provide an overall assessment of the organisation."
         )
 
-        if revenue is not None:
-            summary += (
-                f"\n\nThe company reported revenue of {revenue:,}, "
-                f"indicating the scale of its operations."
+        metrics = getattr(report.extraction, "metrics", []) or []
+        if metrics:
+            summary += "\n\n" + "; ".join(
+                f"{metric.get('metric', 'Metric')}: {format_financial_value(metric, metric.get('metric'))}"
+                for metric in metrics if isinstance(metric, dict) and metric.get("value") is not None
             )
-
-        if profit is not None:
-            summary += (
-                f" Net profit of {profit:,} reflects "
-                f"overall profitability."
-            )
-
-        if operating_margin is not None:
-            summary += (
-                f" Operating margin of {operating_margin}% "
-                f"provides insight into operational efficiency."
-            )
-
-        summary += (
-            "\n\nOverall, the financial information suggests that "
-            "further evaluation of profitability, liquidity, "
-            "financial risks and competitive positioning is "
-            "required before drawing investment conclusions."
-        )
 
         return summary
 
@@ -97,7 +119,4 @@ class ReportFormatter:
         if report.research:
             points.append("Research findings include cited evidence.")
 
-        while len(points) < 10:
-            points.append("Additional financial analysis recommended.")
-
-        return points[:10]
+        return list(dict.fromkeys(points))

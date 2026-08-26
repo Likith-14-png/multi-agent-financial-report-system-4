@@ -90,6 +90,10 @@ class GeminiService:
                 return parsed
             except Exception as exc:
                 last_exc = exc
+                if self._is_permanent_model_error(exc):
+                    logger.error("Gemini model '%s' is unavailable; using offline fallback without retrying: %s", self.model_name, exc)
+                    metrics.GEMINI_FALLBACK_TOTAL.inc()
+                    return self.offline_analyzer.analyze(prompt, context_chunks)
                 # If we have remaining attempts, sleep with exponential backoff + jitter then retry
                 if attempt < max_retries:
                     metrics.GEMINI_RETRIES_TOTAL.inc()
@@ -111,6 +115,14 @@ class GeminiService:
                 logger.warning("Gemini analysis failed after %s attempts; falling back: %s", attempt + 1, exc)
                 metrics.GEMINI_FALLBACK_TOTAL.inc()
                 return self.offline_analyzer.analyze(prompt, context_chunks)
+
+    @staticmethod
+    def _is_permanent_model_error(exc: Exception) -> bool:
+        code = getattr(exc, "code", None)
+        if code == 404:
+            return True
+        text = str(exc).lower()
+        return "model" in text and ("not found" in text or "no longer available" in text)
 
     def _parse_json_text(self, text: str) -> Optional[Dict[str, Any]]:
         """Attempt to extract a JSON object from `text` robustly.

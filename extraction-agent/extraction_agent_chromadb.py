@@ -79,6 +79,17 @@ results = collection.get(
     ]
 )
 
+if not results.get("documents"):
+    results = collection.get(
+        where={
+            "$and": [
+                {"analysis_id": analysis_id},
+                {"document_id": doc_hash},
+            ]
+        },
+        include=["documents", "metadatas"],
+    )
+
 
 documents = results.get(
     "documents",
@@ -89,6 +100,16 @@ metadatas = results.get(
     "metadatas",
     []
 )
+
+ordered_records = sorted(
+    zip(documents, metadatas),
+    key=lambda item: (
+        int((item[1] or {}).get("page_start", (item[1] or {}).get("page_number", 1)) or 1),
+        int((item[1] or {}).get("chunk_index", 0) or 0),
+    ),
+)
+documents = [doc for doc, _ in ordered_records]
+metadatas = [meta for _, meta in ordered_records]
 
 
 if not documents:
@@ -180,17 +201,18 @@ data = {
     "Source": source,
     "Analysis ID": analysis_id,
     "Document Hash": doc_hash,
-    "Revenue": extraction_output.get("revenue") or "Not Found",
-    "Operating Income": extraction_output.get("operating_income") or "Not Found",
-    "Net Income": extraction_output.get("net_income") or "Not Found",
-    "Assets": extraction_output.get("total_assets") or "Not Found",
-    "Liabilities": extraction_output.get("total_liabilities") or "Not Found",
-    "Equity": extraction_output.get("total_equity") or "Not Found",
-    "Free Cash Flow": extraction_output.get("free_cash_flow") or "Not Found",
-    "Operating Cash Flow": extraction_output.get("operating_cash_flow") or "Not Found",
-    "EPS": extraction_output.get("eps") or "Not Found",
-    "R&D": extraction_output.get("rd_expense") or "Not Found",
-    "Total Debt": extraction_output.get("total_debt") or "Not Found",
+    "Revenue": extraction_output.get("revenue") if extraction_output.get("revenue") is not None else "Not Found",
+    "Operating Income": extraction_output.get("operating_income") if extraction_output.get("operating_income") is not None else "Not Found",
+    "Net Income": extraction_output.get("net_income") if extraction_output.get("net_income") is not None else "Not Found",
+    "Assets": extraction_output.get("total_assets") if extraction_output.get("total_assets") is not None else "Not Found",
+    "Liabilities": extraction_output.get("total_liabilities") if extraction_output.get("total_liabilities") is not None else "Not Found",
+    "Equity": extraction_output.get("total_equity") if extraction_output.get("total_equity") is not None else "Not Found",
+    "Free Cash Flow": extraction_output.get("free_cash_flow") if extraction_output.get("free_cash_flow") is not None else "Not Found",
+    "Operating Cash Flow": extraction_output.get("operating_cash_flow") if extraction_output.get("operating_cash_flow") is not None else "Not Found",
+    "EPS": extraction_output.get("eps") if extraction_output.get("eps") is not None else "Not Found",
+    "R&D": extraction_output.get("rd_expense") if extraction_output.get("rd_expense") is not None else "Not Found",
+    "Total Debt": extraction_output.get("total_debt") if extraction_output.get("total_debt") is not None else "Not Found",
+    "Financial Values": extraction_output.get("financial_values", {}),
     "Yearly Metrics": extraction_output.get("yearly_metrics") or {},
     "Segment Metrics": extraction_output.get("segment_metrics") or {},
     "Accounting Notes": extraction_output.get("accounting_information") or [],

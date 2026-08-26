@@ -139,6 +139,9 @@ def _parse_numeric_value(value: Any) -> Tuple[Optional[float], Optional[str]]:
         return None, None
 
     lower = text.lower().replace(" ", "")
+    if "%" in lower:
+        match = re.search(r"[-+]?\d*\.?\d+", lower)
+        return (float(match.group(0)), "percent") if match else (None, None)
     unit = "unitless"
     if "crore" in lower or "cr" in lower:
         unit = "crore"
@@ -189,6 +192,256 @@ def _convert_to_unit(value: float, source_unit: Optional[str], target_unit: str)
     if factor is None:
         return value
     return value * factor
+
+
+def _currency_for_value(value: Any, record: Dict[str, Any]) -> Optional[str]:
+    explicit = record.get("currency") or record.get("currency_code")
+    if explicit:
+        return str(explicit).upper()
+    text = str(value or "")
+    if "₹" in text or re.search(r"\b(?:INR|Rs\.?)\b", text, re.I):
+        return "INR"
+    if "€" in text or re.search(r"\bEUR\b", text, re.I):
+        return "EUR"
+    if "£" in text or re.search(r"\bGBP\b", text, re.I):
+        return "GBP"
+    if "$" in text or re.search(r"\bUSD\b", text, re.I):
+        return "USD"
+    if "¥" in text or re.search(r"\b(?:JPY|CNY)\b", text, re.I):
+        return "JPY"
+    return None
+
+
+def _comparison_metric_key(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9%]+", " ", str(value or "").lower()).strip()
+    aliases = {
+        "sales": "revenue",
+        "net sales": "revenue",
+        "net profit": "net income",
+        "profit": "net income",
+        "operating profit": "operating income",
+        "ebit": "operating income",
+        "operating margin": "operating margin",
+        "debt to equity": "debt to equity",
+        "debt equity": "debt to equity",
+        "total debt": "debt",
+        "borrowings": "debt",
+        "total shareholders equity": "total equity",
+        "shareholders equity": "total equity",
+        "total stockholders equity": "total equity",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _comparison_unit_value(value: float, unit: Optional[str], target_unit: Optional[str]) -> Optional[float]:
+    if value is None or target_unit is None:
+        return None
+    base_units = {
+        "thousand": 1_000.0,
+        "million": 1_000_000.0,
+        "billion": 1_000_000_000.0,
+        "crore": 10_000_000.0,
+        "lakh": 100_000.0,
+        "percent": 0.01,
+        "unitless": 1.0,
+    }
+    source_factor = base_units.get(unit or "unitless")
+    target_factor = base_units.get(target_unit)
+    if source_factor is None or target_factor is None:
+        return None
+    return value * source_factor / target_factor
+
+
+def _comparison_period(record: Dict[str, Any]) -> Optional[int]:
+    return _normalize_year_value(record.get("report_year") or record.get("year") or record.get("period"))
+
+
+def _comparison_context(record: Dict[str, Any]) -> Optional[str]:
+    value = record.get("statement_context") or record.get("context") or record.get("section_type") or record.get("section")
+    if not value:
+        return None
+    text = re.sub(r"[^a-z]+", " ", str(value).lower()).strip()
+    if "segment" in text or "division" in text or "geographic" in text:
+        return "segment"
+    if "standalone" in text or "separate" in text:
+        return "standalone"
+    if "consolidated" in text or "group" in text:
+        return "consolidated"
+    if "income statement" in text or "balance sheet" in text or "cash flow" in text or "financial statement" in text:
+        return "financial_statement"
+    return text
+
+
+def _comparison_definition(record: Dict[str, Any], metric_key: str) -> Optional[str]:
+    value = record.get("metric_definition") or record.get("definition") or record.get("metric_type")
+    if value:
+        return re.sub(r"[^a-z]+", " ", str(value).lower()).strip()
+    if metric_key in {"revenue", "operating income", "net income", "total assets", "total liabilities", "total equity", "debt", "cash flow"}:
+        return "financial_amount"
+    if metric_key in {"operating margin", "net margin", "gross margin", "debt to equity"}:
+        return "financial_ratio"
+    if metric_key == "eps":
+        return "per_share"
+    return None
+
+
+def _comparison_metric_type(metric_name: str, unit: Optional[str] = None) -> str:
+    """Classify a metric before applying any unit conversion."""
+    normalized = _normalize_metric_name(metric_name)
+    unit_name = str(unit or "").lower().replace("-", "_")
+    if unit_name in {"per_share", "per share"} or normalized in {"eps", "basic eps", "diluted eps"}:
+        return "per_share"
+    if unit_name in {"percent", "%"} or "margin" in normalized or "growth" in normalized:
+        return "percentage"
+    if unit_name in {"x", "ratio", "multiple"} or "ratio" in normalized or "debt to equity" in normalized:
+        return "ratio"
+    if unit_name == "days" or normalized.endswith(" days"):
+        return "days"
+    if normalized in {
+        "revenue", "gross profit", "cost of revenue", "operating income", "net income",
+        "total assets", "total liabilities", "total equity", "debt", "total debt",
+        "cash", "cash flow", "operating cash flow", "free cash flow",
+    }:
+        return "monetary"
+    return "other"
+
+
+def resolve_comparison_context(
+    metric_name: str,
+    numeric_value: Optional[float],
+    currency: Optional[str] = None,
+    unit: Optional[str] = None,
+    unit_multiplier: Optional[float] = None,
+    raw_value: Any = None,
+) -> Dict[str, Any]:
+    """Resolve authoritative comparison metadata without reinterpreting it."""
+    metric_type = _comparison_metric_type(metric_name, unit)
+    normalized_unit = str(unit).lower().replace(" ", "_") if unit else None
+    if metric_type == "per_share":
+        normalized_unit = "per_share"
+    elif metric_type == "percentage":
+        normalized_unit = "percent"
+    elif metric_type == "ratio":
+        normalized_unit = "x"
+    if unit_multiplier is None:
+        unit_multiplier = {
+            "thousand": 1_000.0,
+            "million": 1_000_000.0,
+            "billion": 1_000_000_000.0,
+            "lakh": 100_000.0,
+            "crore": 10_000_000.0,
+        }.get(normalized_unit, 1.0)
+    return {
+        "numeric_value": numeric_value,
+        "currency": str(currency).upper() if currency else None,
+        "unit": normalized_unit or ("unitless" if metric_type == "other" else None),
+        "unit_multiplier": 1.0 if metric_type in {"per_share", "percentage", "ratio", "days", "other"} else float(unit_multiplier),
+        "metric_type": metric_type,
+        "is_monetary": metric_type == "monetary",
+        "raw_value": raw_value,
+    }
+
+
+def _structured_comparison_value(record: Dict[str, Any], metric_name: str) -> Dict[str, Any]:
+    """Use structured extraction fields first and parse raw values only as fallback."""
+    nested_value = record.get("value") if isinstance(record.get("value"), dict) else None
+    source_record = {**record, **(nested_value or {})}
+    raw_value = record.get("raw_value")
+    if raw_value is None:
+        raw_value = source_record.get("display_value")
+    if raw_value is None:
+        metric_key = _comparison_metric_key(metric_name)
+        raw_value = (
+            record.get("value")
+            or record.get("current_value")
+            or record.get("amount")
+            or record.get(metric_key)
+            or record.get(metric_key.replace(" ", "_"))
+            or record.get(metric_name)
+        )
+    numeric_value = source_record.get("numeric_value")
+    unit = source_record.get("unit") or source_record.get("unit_scale")
+    currency = source_record.get("currency") or source_record.get("currency_code")
+    unit_multiplier = source_record.get("unit_multiplier")
+    if numeric_value is None:
+        numeric_value, parsed_unit = _parse_numeric_value(raw_value)
+        unit = unit or parsed_unit
+    context = resolve_comparison_context(
+        metric_name,
+        numeric_value,
+        currency=currency or _currency_for_value(raw_value, record),
+        unit=unit,
+        unit_multiplier=unit_multiplier,
+        raw_value=raw_value,
+    )
+    return context
+
+
+def _normalized_comparison_value(context: Dict[str, Any]) -> Optional[float]:
+    if context.get("numeric_value") is None:
+        return None
+    if context.get("is_monetary"):
+        return context["numeric_value"] * context.get("unit_multiplier", 1.0)
+    return context["numeric_value"]
+
+
+def _comparison_pair_values(
+    metric_name: str,
+    first: Dict[str, Any],
+    second: Dict[str, Any],
+) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+    """Normalize a pair only when monetary source units differ."""
+    first_value = first.get("numeric_value")
+    second_value = second.get("numeric_value")
+    if first_value is None or second_value is None:
+        return first_value, second_value, first.get("unit") or second.get("unit")
+    if first.get("metric_type") != "monetary" or first.get("unit") == second.get("unit"):
+        return first_value, second_value, first.get("unit") or second.get("unit")
+    return _normalized_comparison_value(first), _normalized_comparison_value(second), "absolute"
+
+
+def _comparison_payload(
+    metric_label: str,
+    company_a: Dict[str, Any],
+    company_b: Dict[str, Any],
+    a_raw: Any,
+    b_raw: Any,
+    a_value: Optional[float],
+    b_value: Optional[float],
+    a_unit: Optional[str],
+    b_unit: Optional[str],
+    reason: str,
+) -> Dict[str, Any]:
+    context_a = _structured_comparison_value(company_a, metric_label)
+    context_b = _structured_comparison_value(company_b, metric_label)
+    return {
+        "metric": metric_label,
+        "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": a_raw, "currency": context_a.get("currency"), "unit": context_a.get("unit")},
+        "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": b_raw, "currency": context_b.get("currency"), "unit": context_b.get("unit")},
+        "difference": None,
+        "direction": "unavailable",
+        "unit": None,
+        "comparison_status": "not_comparable",
+        "absolute_difference": None,
+        "percentage_difference": None,
+        "difference_basis": "company_b_minus_company_a",
+        "metric_direction": None,
+        "better_company": None,
+        "interpretation": f"Comparison cannot be performed because {reason}.",
+        "not_comparable_reason": reason,
+        "comparability_metadata": {
+            "original_company_a_value": company_a,
+            "original_company_b_value": company_b,
+            "normalized_company_a_value": None,
+            "normalized_company_b_value": None,
+            "currency": None,
+            "unit_scale": None,
+            "reporting_period": None,
+            "metric_name": metric_label,
+            "metric_equivalence": False,
+            "normalization_status": "rejected",
+        },
+    }
 
 
 def _clean_source_chunk_value(value: Any) -> Optional[str]:
@@ -357,17 +610,15 @@ def _metric_series_for_name(metric_name: str, extracted_metrics: Dict[str, Any])
                     year = item.get("year") or item.get("period") or item.get("report_year")
                     value = item.get("value") or item.get("amount")
                     if year is not None and value is not None:
-                        normalized.append({
-                            "year": year,
-                            "value": value,
-                            "source": item.get("source"),
-                            "chunk_id": item.get("chunk_id"),
-                            "source_chunks": item.get("source_chunks"),
-                        })
+                        normalized.append({**item, "year": year, "value": value})
             if not any(_normalize_year_value(item.get("year")) == direct_year for item in normalized):
                 normalized.insert(0, {
                     "year": direct_year,
                     "value": direct_value,
+                    "numeric_value": extracted_metrics.get("numeric_value"),
+                    "currency": extracted_metrics.get("currency"),
+                    "unit": extracted_metrics.get("unit") or extracted_metrics.get("unit_scale"),
+                    "unit_multiplier": extracted_metrics.get("unit_multiplier"),
                     "source": extracted_metrics.get("source"),
                     "chunk_id": extracted_metrics.get("chunk_id"),
                     "source_chunks": extracted_metrics.get("source_chunks"),
@@ -383,13 +634,7 @@ def _metric_series_for_name(metric_name: str, extracted_metrics: Dict[str, Any])
                     year = item.get("year") or item.get("period") or item.get("report_year")
                     value = item.get("value") or item.get("amount")
                     if year is not None and value is not None:
-                        normalized.append({
-                            "year": year,
-                            "value": value,
-                            "source": item.get("source"),
-                            "chunk_id": item.get("chunk_id"),
-                            "source_chunks": item.get("source_chunks"),
-                        })
+                        normalized.append({**item, "year": year, "value": value})
             return normalized
         return []
 
@@ -400,13 +645,7 @@ def _metric_series_for_name(metric_name: str, extracted_metrics: Dict[str, Any])
             year = item.get("year") or item.get("period") or item.get("report_year")
             value = item.get("value") or item.get("amount")
             if value is not None:
-                normalized.append({
-                    "year": year,
-                    "value": value,
-                    "source": item.get("source"),
-                    "chunk_id": item.get("chunk_id"),
-                    "source_chunks": item.get("source_chunks"),
-                })
+                normalized.append({**item, "year": year, "value": value})
         return normalized
 
     if direct_value is None:
@@ -418,18 +657,16 @@ def _metric_series_for_name(metric_name: str, extracted_metrics: Dict[str, Any])
                 year = item.get("year") or item.get("period") or item.get("report_year")
                 value = item.get("value") or item.get("amount")
                 if value is not None:
-                    normalized.append({
-                        "year": year,
-                        "value": value,
-                        "source": item.get("source"),
-                        "chunk_id": item.get("chunk_id"),
-                        "source_chunks": item.get("source_chunks"),
-                    })
+                    normalized.append({**item, "year": year, "value": value})
         return normalized
     year = extracted_metrics.get("report_year")
     return [{
         "year": year,
         "value": direct_value,
+        "numeric_value": extracted_metrics.get("numeric_value"),
+        "currency": extracted_metrics.get("currency"),
+        "unit": extracted_metrics.get("unit") or extracted_metrics.get("unit_scale"),
+        "unit_multiplier": extracted_metrics.get("unit_multiplier"),
         "source": extracted_metrics.get("source"),
         "chunk_id": extracted_metrics.get("chunk_id"),
         "source_chunks": extracted_metrics.get("source_chunks"),
@@ -460,29 +697,35 @@ def _rounded_float(value: Optional[float], digits: int = 10) -> Optional[float]:
 
 
 def _serialize_record(metric_name: str, current_year: Any, current_value: Any, unit: Any, previous_year: Any = None, previous_value: Any = None, source: Any = None, source_chunks: Optional[List[str]] = None) -> Dict[str, Any]:
-    current_numeric, current_unit = _parse_numeric_value(current_value)
-    previous_numeric, previous_unit = _parse_numeric_value(previous_value)
-    chosen_unit = unit or current_unit or "unitless"
-
-    if previous_numeric is not None and current_numeric is not None and chosen_unit not in (None, "unitless") and previous_unit is not None and previous_unit != chosen_unit:
-        previous_numeric = _convert_to_unit(previous_numeric, previous_unit, chosen_unit)
-        current_numeric = _convert_to_unit(current_numeric, current_unit or chosen_unit, chosen_unit)
+    current_observation = current_value if isinstance(current_value, dict) else {"value": current_value}
+    previous_observation = previous_value if isinstance(previous_value, dict) else {"value": previous_value}
+    current_context = _structured_comparison_value(current_observation, metric_name)
+    previous_context = _structured_comparison_value(previous_observation, metric_name)
+    current_source_numeric = current_context.get("numeric_value")
+    previous_source_numeric = previous_context.get("numeric_value")
+    current_numeric, previous_numeric, comparison_unit = _comparison_pair_values(metric_name, current_context, previous_context)
+    chosen_unit = unit or comparison_unit or current_context.get("unit") or "unitless"
+    chosen_currency = current_context.get("currency") or previous_context.get("currency")
 
     record: Dict[str, Any] = {
         "metric": metric_name,
         "Metric": metric_name,
-        "value": current_numeric if current_numeric is not None else current_value,
-        "Value": current_numeric if current_numeric is not None else current_value,
+        "value": current_source_numeric if current_source_numeric is not None else current_value,
+        "Value": current_source_numeric if current_source_numeric is not None else current_value,
         "unit": chosen_unit,
         "Unit": chosen_unit,
+        "currency": chosen_currency,
+        "metric_type": current_context.get("metric_type"),
+        "unit_multiplier": current_context.get("unit_multiplier"),
+        "comparison_value": current_numeric,
         "current_year": current_year,
         "CurrentYear": current_year,
         "current_value": current_numeric,
         "CurrentValue": current_numeric,
-        "source": source or "Extracted Financial Metrics",
+        "source": source or current_observation.get("source") or "Extracted Financial Metrics",
         "Source": source or "Extracted Financial Metrics",
-        "source_chunks": source_chunks or [],
-        "SourceChunks": source_chunks or [],
+        "source_chunks": source_chunks or current_observation.get("source_chunks") or [],
+        "SourceChunks": source_chunks or current_observation.get("source_chunks") or [],
     }
 
     if previous_year is not None:
@@ -490,6 +733,7 @@ def _serialize_record(metric_name: str, current_year: Any, current_value: Any, u
         record["PreviousYear"] = previous_year
         record["previous_value"] = previous_numeric
         record["PreviousValue"] = previous_numeric
+        record["previous_source_value"] = previous_source_numeric
         if current_numeric is not None and previous_numeric is not None:
             absolute_change = _rounded_float(current_numeric - previous_numeric)
             record["absolute_change"] = absolute_change
@@ -523,40 +767,106 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     m_key = metric_label.lower().replace(" ", "_")
     a_raw = company_a.get("value") or company_a.get("current_value") or company_a.get("amount") or company_a.get(m_key) or company_a.get(metric_label)
     b_raw = company_b.get("value") or company_b.get("current_value") or company_b.get("amount") or company_b.get(m_key) or company_b.get(metric_label)
-    a_value, a_unit = _parse_numeric_value(a_raw)
-    b_value, b_unit = _parse_numeric_value(b_raw)
+    metric_a = _comparison_metric_key(company_a.get("metric") or metric_label)
+    metric_b = _comparison_metric_key(company_b.get("metric") or metric_label)
+    requested_metric = _comparison_metric_key(metric_label)
+    a_context = _structured_comparison_value(company_a, metric_label)
+    b_context = _structured_comparison_value(company_b, metric_label)
+    a_value = a_context.get("numeric_value")
+    b_value = b_context.get("numeric_value")
+    a_unit = a_context.get("unit")
+    b_unit = b_context.get("unit")
+    if metric_a != requested_metric or metric_b != requested_metric or metric_a != metric_b:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the metrics are not equivalent")
+
+    currency_a = a_context.get("currency")
+    currency_b = b_context.get("currency")
+    if currency_a and currency_b and currency_a != currency_b:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the currencies differ")
+
+    period_a = _comparison_period(company_a)
+    period_b = _comparison_period(company_b)
+    if period_a is not None and period_b is not None and period_a != period_b:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the reporting periods differ")
+
+    context_a = _comparison_context(company_a)
+    context_b = _comparison_context(company_b)
+    if context_a and context_b and context_a != context_b:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the statement contexts differ")
+    definition_a = _comparison_definition(company_a, requested_metric)
+    definition_b = _comparison_definition(company_b, requested_metric)
+    if definition_a and definition_b and definition_a != definition_b:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the metric definitions differ")
+
     if a_value is None or b_value is None:
-        return {
-            "metric": metric_label,
-            "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": company_a.get("value") or company_a.get("current_value"), "unit": a_unit},
-            "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": company_b.get("value") or company_b.get("current_value"), "unit": b_unit},
-            "difference": None,
-            "direction": "unavailable",
-            "unit": None,
-        }
+        reason = "a value is missing" if a_raw in (None, "") or b_raw in (None, "") else "a value is not numeric"
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, reason)
 
-    target_unit = a_unit if a_unit == b_unit else "billion" if a_unit in {"thousand", "million", "billion"} and b_unit in {"thousand", "million", "billion"} else None
-    if target_unit is None:
-        return {
-            "metric": metric_label,
-            "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": a_value, "unit": a_unit},
-            "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": b_value, "unit": b_unit},
-            "difference": None,
-            "direction": "unavailable",
-            "unit": None,
-        }
+    metric_type = a_context.get("metric_type")
+    if metric_type != b_context.get("metric_type"):
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the metric types differ")
+    if metric_type == "monetary" and (a_unit is None or b_unit is None):
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "a monetary unit is unknown")
+    normalized_a, normalized_b, target_unit = _comparison_pair_values(metric_label, a_context, b_context)
+    target_unit = target_unit or "unitless"
+    if normalized_a is None or normalized_b is None:
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the units cannot be normalized")
 
-    normalized_a = _convert_to_unit(a_value, a_unit, target_unit)
-    normalized_b = _convert_to_unit(b_value, b_unit, target_unit)
     difference = _rounded_float(normalized_b - normalized_a)
     direction = "increase" if difference > 0 else "decrease" if difference < 0 else "unchanged"
+    status = "equal" if math.isclose(normalized_a, normalized_b, rel_tol=0.0, abs_tol=1e-10) else "comparable"
+    direction_rules = {
+        "revenue": "higher_better",
+        "operating income": "higher_better",
+        "operating margin": "higher_better",
+        "net income": "higher_better",
+        "debt": "lower_better",
+        "debt to equity": "lower_better",
+        "cash flow": "higher_better",
+        "total assets": "neutral",
+        "total equity": "neutral",
+    }
+    metric_direction = direction_rules.get(requested_metric, "higher_better")
+    better_company = None
+    if status != "equal" and metric_direction != "neutral":
+        if metric_direction == "higher_better":
+            better_company = company_b.get("company_name") if normalized_b > normalized_a else company_a.get("company_name")
+        else:
+            better_company = company_b.get("company_name") if normalized_b < normalized_a else company_a.get("company_name")
+    if status == "equal":
+        interpretation = "The companies have equal normalized values."
+    elif better_company:
+        interpretation = f"{better_company} has {'higher' if metric_direction == 'higher_better' else 'lower'} {metric_label.lower()} than {company_a.get('company_name') if better_company == company_b.get('company_name') else company_b.get('company_name')}."
+    else:
+        interpretation = f"The companies have different {metric_label.lower()} values; the metric direction is neutral."
     return {
         "metric": metric_label,
-        "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": _rounded_float(normalized_a), "unit": target_unit},
-        "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": _rounded_float(normalized_b), "unit": target_unit},
+        "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": a_value, "currency": currency_a, "unit": a_unit, "comparison_value": _rounded_float(normalized_a)},
+        "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": b_value, "currency": currency_b, "unit": b_unit, "comparison_value": _rounded_float(normalized_b)},
         "difference": difference,
         "direction": direction,
         "unit": target_unit,
+        "comparison_status": status,
+        "absolute_difference": _rounded_float(abs(difference)),
+        "percentage_difference": _percentage_change(normalized_b, normalized_a),
+        "difference_basis": "company_b_minus_company_a",
+        "metric_direction": metric_direction,
+        "better_company": better_company,
+        "interpretation": interpretation,
+        "comparability_metadata": {
+            "original_company_a_value": a_raw,
+            "original_company_b_value": b_raw,
+            "normalized_company_a_value": _rounded_float(normalized_a),
+            "normalized_company_b_value": _rounded_float(normalized_b),
+            "currency": currency_a or currency_b,
+            "unit_scale": target_unit,
+            "reporting_period": period_a if period_a is not None else period_b,
+            "statement_context": context_a or context_b,
+            "metric_name": metric_label,
+            "metric_definition": definition_a or definition_b,
+            "metric_equivalence": True,
+            "normalization_status": "equal" if status == "equal" else "normalized",
+        },
     }
 
 
@@ -615,6 +925,9 @@ def compare_extracted_metrics(extracted_metrics: Dict[str, Any]) -> ComparisonRe
 
         current_numeric, current_unit = _parse_numeric_value(current_value)
         if current_numeric is None:
+            current_context = _structured_comparison_value(current_item, metric_name)
+            current_numeric = current_context.get("numeric_value")
+        if current_numeric is None:
             continue
 
         previous_year = None
@@ -626,7 +939,7 @@ def compare_extracted_metrics(extracted_metrics: Dict[str, Any]) -> ComparisonRe
             item_year = _normalize_year_value(item.get("year"))
             if item_year is not None and item_year < current_year:
                 previous_year = item_year
-                previous_value = item.get("value")
+                previous_value = item
             for chunk in _extract_source_chunks(item):
                 if chunk and chunk not in metric_evidence_sources:
                     metric_evidence_sources.append(chunk)
@@ -655,7 +968,7 @@ def compare_extracted_metrics(extracted_metrics: Dict[str, Any]) -> ComparisonRe
             )
             if prev_candidate is not None:
                 previous_year = _normalize_year_value(prev_candidate.get("year"))
-                previous_value = prev_candidate.get("value")
+                previous_value = prev_candidate
 
         if current_year is None and previous_year is None:
             continue
@@ -663,7 +976,7 @@ def compare_extracted_metrics(extracted_metrics: Dict[str, Any]) -> ComparisonRe
         record = _serialize_record(
             metric_name,
             current_year,
-            current_value,
+            current_item,
             current_unit,
             previous_year=previous_year,
             previous_value=previous_value,
