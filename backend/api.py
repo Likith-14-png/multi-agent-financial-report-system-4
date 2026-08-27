@@ -236,6 +236,52 @@ def _normalize_extraction(raw_extraction: Any) -> dict[str, Any]:
     }
 
 
+def _public_extraction_payload(raw_extraction: Any, analysis_id: str, company_name: Any, report_year: Any) -> dict[str, Any]:
+    """Project rich internal extraction data onto the public extraction contract."""
+    raw = raw_extraction if isinstance(raw_extraction, dict) else {}
+    metric_records: List[Dict[str, Any]] = []
+    financial_values = raw.get("financial_values") if isinstance(raw.get("financial_values"), dict) else {}
+    for key, value_record in financial_values.items():
+        if not isinstance(value_record, dict) or value_record.get("display_value") is None:
+            continue
+        provenance = value_record.get("provenance") if isinstance(value_record.get("provenance"), dict) else {}
+        metric_records.append({
+            "metric": value_record.get("metric") or key.replace("_", " ").title(),
+            "value": value_record.get("display_value"),
+            "currency": value_record.get("currency"),
+            "unit": value_record.get("unit_scale"),
+            "period": value_record.get("period"),
+            "evidence": value_record.get("evidence"),
+            "page": value_record.get("source_page"),
+            "source": value_record.get("source_file"),
+            "provenance": {
+                "source_file": provenance.get("source_file") or value_record.get("source_file"),
+                "page": provenance.get("page") or value_record.get("source_page"),
+                "chunk_id": provenance.get("chunk_id") or value_record.get("source_chunk"),
+                "section": provenance.get("section") or value_record.get("section"),
+            },
+        })
+
+    scalar_keys = (
+        "revenue", "gross_profit", "operating_income", "pretax_income", "net_income",
+        "total_assets", "total_liabilities", "total_equity", "cash_flow",
+        "operating_cash_flow", "free_cash_flow", "rd_expense", "eps", "basic_eps",
+        "diluted_eps", "trend_eps",
+    )
+    payload: Dict[str, Any] = {
+        "analysis_id": analysis_id,
+        "document_id": raw.get("document_id"),
+        "company_name": company_name or raw.get("company_name"),
+        "report_year": _coerce_report_year(report_year or raw.get("report_year")),
+        "metrics": metric_records,
+        "source": raw.get("source"),
+        "source_file": raw.get("source_file") or raw.get("source"),
+        "chunk_id": raw.get("chunk_id"),
+    }
+    payload.update({key: raw.get(key) for key in scalar_keys})
+    return payload
+
+
 def _api_error_payload(message: str, code: str = "ANALYSIS_FAILED", stage: str = "api") -> dict[str, Any]:
     return {
         "detail": message,
@@ -578,11 +624,7 @@ async def get_extraction(analysis_id: str) -> dict[str, Any]:
     else:
         ext_result = session.extraction_result
 
-    res = dict(ext_result)
-    res.setdefault("analysis_id", session.analysis_id)
-    res.setdefault("company_name", session.company_name)
-    res.setdefault("report_year", session.report_year)
-    return _json_safe(res)
+    return _json_safe(_public_extraction_payload(ext_result, session.analysis_id, session.company_name, session.report_year))
 
 
 # ------------------------------------------------------------------ #

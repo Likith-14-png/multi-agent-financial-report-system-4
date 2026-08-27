@@ -1,0 +1,15 @@
+{
+  "started_at": "",
+  "pdf": "C:\\Users\\rajan\\Downloads\\financial_cross_check_test_fixture.pdf",
+  "page_count": 0,
+  "analysis_id": "",
+  "expected_occurrences": [],
+  "expected_selected": {},
+  "api_status": null,
+  "comparison": {
+    "checked_metrics": [],
+    "discrepancies": [],
+    "passed": false
+  },
+  "error": null
+}

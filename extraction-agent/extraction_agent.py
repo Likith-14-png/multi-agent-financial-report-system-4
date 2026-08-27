@@ -1151,9 +1151,9 @@ def _find_grounded_chunk_for_observation(
     obs: Dict[str, Any],
     chunk_records: List[Dict[str, Any]],
     target_year: Optional[int] = None,
-) -> Tuple[Optional[str], int, str, float]:
+) -> Tuple[Optional[str], int, str, float, str]:
     if not chunk_records:
-        return None, 1, "", 0.0
+        return None, 1, "", 0.0, ""
     raw_val = str(obs.get("raw_value", "")).strip()
     num_val = obs.get("numeric_value")
     num_str = f"{num_val:.2f}".rstrip("0").rstrip(".") if num_val is not None else ""
@@ -1167,13 +1167,16 @@ def _find_grounded_chunk_for_observation(
     best_page = 1
     best_snippet = ""
     best_score = 0.0
+    best_section = ""
     for chunk in chunk_records:
         c_text = chunk.get("text", "")
         if not c_text:
             continue
         c_text_lower = c_text.lower()
-        c_meta = chunk.get("metadata", {})
-        sec_title = str(c_meta.get("section_title", "")).lower()
+        c_meta = chunk.get("metadata", {}) if isinstance(chunk.get("metadata"), dict) else {}
+        sec_title = str(
+            chunk.get("section_title") or c_meta.get("section_title") or c_meta.get("section") or ""
+        ).lower()
         has_num = False
         if raw_val and raw_val.lower() in c_text_lower:
             has_num = True
@@ -1187,14 +1190,35 @@ def _find_grounded_chunk_for_observation(
         lines = c_text.splitlines()
         found_in_same_line = False
         matching_line = ""
-        for line in lines:
+        matching_line_index = -1
+        for line_index, line in enumerate(lines):
             line_lower = line.lower()
             if (num_str and num_str in line) or (raw_digits and raw_digits in re.sub(r"[^\d.]", "", line)) or (raw_val.lower() in line_lower):
                 matching_line = line.strip()
+                matching_line_index = line_index
                 if any(re.search(alias, line, re.I) for alias in aliases):
                     found_in_same_line = True
                     score += 15.0
                     break
+        occurrence_index = matching_line_index
+        if occurrence_index >= 0 and not any(re.search(alias, lines[occurrence_index], re.I) for alias in aliases):
+            for prior_index in range(occurrence_index - 1, max(-1, occurrence_index - 4), -1):
+                if any(re.search(alias, lines[prior_index], re.I) for alias in aliases):
+                    occurrence_index = prior_index
+                    break
+        current_section = sec_title
+        occurrence_section = sec_title
+        for line_index, line in enumerate(lines):
+            heading = re.sub(r"^[\d.)\s:-]+", "", line).strip()
+            if re.fullmatch(
+                r"(?i)(?:consolidated\s+)?(?:income|profit and loss|statement of operations|operations)\s+statement|"
+                r"(?:consolidated\s+)?balance sheet|(?:consolidated\s+)?cash flow statement|"
+                r"accounting notes(?: and risk indicators)?|risk indicators?",
+                heading,
+            ):
+                current_section = heading
+            if line_index == occurrence_index:
+                occurrence_section = current_section
         if category == "income_statement" and any(w in sec_title or w in c_text_lower[:150] for w in ["profit", "loss", "income statement", "operations", "financial performance", "p&l"]):
             score += 8.0
         elif category == "balance_sheet" and any(w in sec_title or w in c_text_lower[:150] for w in ["balance sheet", "financial position", "assets", "liabilities"]):
@@ -1208,10 +1232,11 @@ def _find_grounded_chunk_for_observation(
                 score -= 30.0
         if score > best_score and score >= 10.0:
             best_score = score
-            best_chunk_id = chunk.get("chunk_id")
-            best_page = chunk.get("page_start", 1)
+            best_chunk_id = chunk.get("chunk_id") or c_meta.get("chunk_id")
+            best_page = chunk.get("page_start") or c_meta.get("page_start") or c_meta.get("page_number") or 1
             best_snippet = (matching_line if matching_line else c_text[:200]).replace("\n", " ")
-    return best_chunk_id, best_page, best_snippet, best_score
+            best_section = occurrence_section
+    return best_chunk_id, best_page, best_snippet, best_score, best_section
 
 
 # ---------------------------------------------------------------------------
@@ -1924,20 +1949,26 @@ def _extract_report_metrics(
         all_observations.extend(obs_list)
     source_name = metadata.get("source") or metadata.get("source_file") or "document"
     for obs in all_observations:
-        c_id, p_num, ev_text, score = _find_grounded_chunk_for_observation(
+        c_id, p_num, ev_text, score, occurrence_section = _find_grounded_chunk_for_observation(
             obs,
             chunk_records=chunk_records,
             target_year=obs.get("report_year", target_year_int),
         )
         obs["source_chunk_id"] = c_id or metadata.get("chunk_id")
         matched_chunk = next((chunk for chunk in chunk_records if str(chunk.get("chunk_id")) == str(obs["source_chunk_id"])), None)
-        matched_metadata = matched_chunk.get("metadata", {}) if isinstance(matched_chunk, dict) else {}
+        matched_metadata = matched_chunk.get("metadata", {}) if isinstance(matched_chunk, dict) and isinstance(matched_chunk.get("metadata", {}), dict) else {}
         obs["source_file"] = matched_metadata.get("source_file") or matched_metadata.get("source") or source_name
         obs["page_number"] = p_num
         obs["exact_evidence"] = ev_text
         obs["source_page"] = p_num
-        obs["source_page_end"] = matched_chunk.get("page_end", p_num) if isinstance(matched_chunk, dict) else p_num
-        obs["source_section"] = matched_metadata.get("section_title") or matched_metadata.get("section")
+        obs["source_page_end"] = (
+            matched_chunk.get("page_end") or matched_metadata.get("page_end") or p_num
+            if isinstance(matched_chunk, dict) else p_num
+        )
+        obs["source_section"] = occurrence_section or (
+            matched_chunk.get("section_title") or matched_metadata.get("section_title") or matched_metadata.get("section")
+            if isinstance(matched_chunk, dict) else matched_metadata.get("section_title") or matched_metadata.get("section")
+        )
         obs["grounding_score"] = score
     all_observations = _deduplicate_observations(all_observations)
     observation_conflicts = _find_observation_conflicts(all_observations)
@@ -1967,6 +1998,7 @@ def _extract_report_metrics(
             if metric_key == "operating_cash_flow":
                 yearly_metrics["Cash Flow"] = yearly_series
     canonical_metrics: Dict[str, Optional[str]] = {}
+    canonical_observations: Dict[str, Dict[str, Any]] = {}
     for metric_key in (
         "revenue", "gross_profit", "cost_of_revenue", "operating_income", "pretax_income",
         "net_income", "operating_margin", "eps", "basic_eps", "diluted_eps", "trend_eps",
@@ -1981,6 +2013,7 @@ def _extract_report_metrics(
         )
         if cand:
             cand["is_canonical"] = True
+            canonical_observations[metric_key] = cand
             canonical_metrics[metric_key] = cand["raw_value"]
         else:
             canonical_metrics[metric_key] = None
@@ -2013,8 +2046,6 @@ def _extract_report_metrics(
                 canonical_metrics[key] = str(matched["value"])
     if not canonical_metrics.get("operating_cash_flow") and canonical_metrics.get("cash_flow"):
         canonical_metrics["operating_cash_flow"] = canonical_metrics["cash_flow"]
-    if not canonical_metrics.get("cash_flow") and canonical_metrics.get("operating_cash_flow"):
-        canonical_metrics["cash_flow"] = canonical_metrics["operating_cash_flow"]
     if not canonical_metrics.get("basic_eps") and canonical_metrics.get("eps"):
         canonical_metrics["basic_eps"] = canonical_metrics["eps"]
     if not canonical_metrics.get("diluted_eps") and canonical_metrics.get("basic_eps"):
@@ -2141,7 +2172,9 @@ def _extract_report_metrics(
                 if obs.get("metric_name") in {"basic_eps", "diluted_eps"}
                 and obs.get("raw_value") == display_value
             ]
-        candidate = next((obs for obs in candidates if obs.get("report_year") == target_year_int), None) or (candidates[0] if candidates else None)
+        candidate = canonical_observations.get(key)
+        if candidate is None:
+            candidate = next((obs for obs in candidates if obs.get("report_year") == target_year_int), None) or (candidates[0] if candidates else None)
         parsed = parse_financial_number(
             str(display_value),
             inherited_currency=table_curr,
@@ -2161,13 +2194,16 @@ def _extract_report_metrics(
             "semantic_status": classify_financial_value_status(display_value),
             "source_file": candidate.get("source_file") if candidate else source_name,
             "source_page": candidate.get("source_page") if candidate else None,
+            "source_page_end": candidate.get("source_page_end") if candidate else None,
             "source_chunk": candidate.get("source_chunk_id") if candidate else metadata.get("chunk_id"),
             "section": candidate.get("source_section") if candidate else None,
             "evidence": candidate.get("exact_evidence") if candidate else None,
             "provenance": {
                 "source_file": candidate.get("source_file") if candidate else source_name,
                 "page": candidate.get("source_page") if candidate else None,
+                "page_end": candidate.get("source_page_end") if candidate else None,
                 "chunk_id": candidate.get("source_chunk_id") if candidate else metadata.get("chunk_id"),
+                "section": candidate.get("source_section") if candidate else None,
             },
             "metric_type": "per_share" if key in {"eps", "basic_eps", "diluted_eps", "trend_eps"} else "financial",
             "conflict_status": "conflict" if key in financial_value_conflicts else "none_detected",

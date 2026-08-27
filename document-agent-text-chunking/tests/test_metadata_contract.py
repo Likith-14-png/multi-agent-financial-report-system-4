@@ -123,3 +123,52 @@ def test_unknown_company_and_report_year_are_explicit():
     assert doc["company_name"] == "Unknown"
     assert doc["report_year"] == "Unknown"
     assert doc["report_period"] == "Unknown"
+
+
+def test_financial_metrics_support_pdf_table_rows_without_delimiters():
+    agent = make_agent()
+    metadata = build_metadata(agent)
+    chunks = [{
+        "text": (
+            "Consolidated Income Statement\n"
+            "Revenue\n"
+            "2024 2023\n"
+            "$15,300 million $13,800 million\n"
+            "Cost of revenue\n"
+            "$8,000 million $7,200 million"
+        ),
+        "page_numbers": [10],
+        "block_types": ["table"],
+        "section_title": "Consolidated Income Statement",
+        "section_type": "financial_statement",
+    }]
+
+    result = agent._build_chunk_metadata(
+        Path("statement.txt"), "hash-statement", chunks, "analysis-statement", [], ["statement-1"], chunks[0]["text"]
+    )[0]
+
+    assert "Revenue: $15,300 million" in result["financial_metrics"]
+    assert "Cost of Revenue: $8,000 million" in result["financial_metrics"]
+    assert result["page_number"] == "10"
+    assert result["source_file"] == "statement.txt"
+    assert result["chunk_id"] == "statement-1"
+
+
+def test_unrelated_text_does_not_create_financial_metric_metadata():
+    agent = make_agent()
+    result = agent._extract_financial_metrics(
+        "The report discusses revenue strategy and cash management without reporting financial values."
+    )
+
+    assert result == ""
+
+
+def test_mixed_financial_sections_use_generic_table_type():
+    agent = make_agent()
+    table_type = agent._table_profile(
+        "Income Statement\nRevenue 100 90\nOperating Income 20 18\n\n"
+        "Balance Sheet\nTotal Assets 500 450\nTotal Liabilities 300 270\n\n"
+        "Cash Flow Statement\nOperating Cash Flow 40 35"
+    )[2]
+
+    assert table_type == "Financial Table"

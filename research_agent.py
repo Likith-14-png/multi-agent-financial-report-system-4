@@ -1129,6 +1129,27 @@ class ResearchAgent:
         return raw_str
 
     @staticmethod
+    def _evidence_snippet(doc_text: str, limit: int = 280) -> str:
+        """Keep citation evidence to the most informative complete sentences."""
+        units = [unit.strip() for unit in re.split(r"(?<=[.!?])\s+|\n+", doc_text or "") if unit.strip()]
+        if not units:
+            return ""
+        evidence_terms = re.compile(
+            r"\b(?:revenue|sales|margin|income|expense|cost|debt|cash flow|increased|increases|increased|grew|growth|declined|decreased|driven by|due to|attributed to|because|primarily)\b|[$€£₹¥]\s*\d|\b\d+(?:\.\d+)?%",
+            re.I,
+        )
+        ranked = sorted(
+            enumerate(units),
+            key=lambda item: (len(evidence_terms.findall(item[1])), -item[0]),
+            reverse=True,
+        )
+        selected = sorted((index for index, unit in ranked[:2] if evidence_terms.search(unit)), key=int)
+        if not selected:
+            selected = [0]
+        snippet = " ".join(units[index] for index in selected)
+        return snippet if len(snippet) <= limit else snippet[:limit].rsplit(" ", 1)[0].rstrip(".,;:") + "."
+
+    @staticmethod
     def _normalize_company_name(value: Any) -> str:
         if value is None:
             return ""
@@ -1538,7 +1559,7 @@ class ResearchAgent:
             _, doc_text, meta, dist = row
             score = float(dist) if dist is not None else 0.5
             text_low = (doc_text or "").lower()
-            sec_title = str(meta.get("section_title", "")).lower()
+            sec_title = str(meta.get("section_title", meta.get("section", ""))).lower()
             sec_type = str(meta.get("section_type", "")).lower()
 
             if self._is_table_of_contents_or_navigation(doc_text):
@@ -1590,6 +1611,65 @@ class ResearchAgent:
                 if sec_type in {"management_discussion", "business", "summary"} or "discussion" in sec_title or "review" in sec_title or "operations" in sec_title:
                     score -= 0.30
 
+                causal_terms = [
+                    "driven by", "primarily due", "due to", "attributed to",
+                    "because of", "resulted from", "led by", "benefited from",
+                    "as a result of", "reflecting",
+                ]
+                has_causal_language = any(term in text_low for term in causal_terms)
+                is_revenue_causal = "revenue" in intent.target_metrics or any(
+                    term in sub_q.lower() for term in ["revenue", "sales", "turnover", "top line"]
+                )
+                if is_revenue_causal:
+                    has_revenue = bool(re.search(r"\b(?:revenue|sales|turnover|top line)\b", text_low))
+                    has_change = bool(re.search(
+                        r"\b(?:increase(?:d)?|grew|growth|rose|expanded|decline(?:d)?|decrease(?:d)?|fell|reduced|change(?:d)?)\b",
+                        text_low,
+                    ))
+                    has_values = bool(re.search(r"[$€£₹¥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:million|billion|bn|m|%)?", text_low))
+                    has_comparison = bool(re.search(
+                        r"\b(?:from|to|versus|vs\.?|compared with|compared to|year.over.year|prior year|previous year|fy\s*20\d{2})\b",
+                        text_low,
+                    ))
+                    if has_revenue:
+                        score -= 0.35
+                    else:
+                        score += 0.80
+                    if has_change:
+                        score -= 0.30
+                    if has_values:
+                        score -= 0.25
+                    if has_comparison:
+                        score -= 0.25
+                    if has_causal_language and has_revenue:
+                        score -= 0.55
+                    elif has_causal_language and not has_revenue:
+                        score += 0.75
+
+                    if any(section in sec_title for section in [
+                        "consolidated income statement", "statement of operations", "income statement",
+                    ]):
+                        score -= 0.45
+                    elif any(section in sec_title for section in [
+                        "revenue & segment", "segment analysis", "segment", "revenue analysis",
+                    ]):
+                        score -= 0.55
+                    elif "management discussion" in sec_title or "results of operations" in sec_title:
+                        score -= 0.50
+                    elif any(section in sec_title for section in ["risk", "accounting", "notes"]):
+                        score += 0.35
+
+                    generic_currency = any(term in text_low for term in [
+                        "foreign currency", "exchange rate", "currency volatility", "currency risk",
+                    ])
+                    if generic_currency and not (has_revenue and has_causal_language):
+                        score += 0.75
+                    if any(term in sec_title for term in ["risk factors", "risk indicators"]):
+                        score += 0.45
+                    if any(term in text_low for term in ["liabilities", "total debt", "borrowings", "balance sheet"]):
+                        if not has_revenue:
+                            score += 0.70
+
             if meta.get("is_financial_table") or meta.get("is_table") or "(In millions)" in doc_text or "(in millions)" in text_low:
                 if not intent.is_causal:
                     score -= 0.20
@@ -1616,7 +1696,7 @@ class ResearchAgent:
 
         for cid, doc_text, meta, dist in rows:
             meta = meta or {}
-            snippet = (doc_text or "")[:280] + ("…" if doc_text and len(doc_text) > 280 else "")
+            snippet = self._evidence_snippet(doc_text)
             company_name = self._metadata_value(meta, "company_name", "company") or target_company or "unknown"
             doc_type = self._metadata_value(meta, "doc_type", "report_type") or "Annual Report"
 
@@ -1919,6 +1999,18 @@ class ResearchAgent:
         # -------------------------------------------------------------- #
         if intent.is_causal or any(w in question.lower() for w in ["why", "reason", "reasons", "cause", "caused", "impact", "driver", "drivers", "factor", "factors", "margin", "operating margin"]):
             extracted_metrics = []
+            is_revenue_causal = "revenue" in intent.target_metrics or "revenue" in question.lower()
+            target_terms = ["revenue", "sales", "turnover", "top line"] if is_revenue_causal else [
+                term for metric in intent.target_metrics for term in {
+                    "operating_margin": ["operating margin", "margin"],
+                    "gross_profit": ["gross profit"],
+                    "operating_income": ["operating income", "operating profit"],
+                    "net_income": ["net income", "net profit", "earnings"],
+                    "expense": ["expense", "cost"],
+                }.get(metric, [metric])
+            ]
+            target_terms = target_terms or ["margin"]
+            citation_texts = [c.snippet.strip() for c in all_citations if c.snippet.strip()]
 
             margin_matches = re.findall(r"((?:operating|gross|profit)\s+margin[^\n\.\;]*?(?:\d+\.?\d*%\s*(?:to\s*\d+\.?\d*%)?|\d+\s*basis\s*points|\d+\.\d+))", combined_text, re.I)
             for mm in margin_matches[:3]:
@@ -1926,12 +2018,18 @@ class ResearchAgent:
                 if clean_m and len(clean_m) > 10:
                     extracted_metrics.append(clean_m)
 
-            rev_growth_m = re.search(r"(revenue[^\n\.\;]*?(?:grew|expanded|increased|declined|decreased)[^\n\.\;]*?\d+\.?\d*%)", combined_text, re.I)
-            if rev_growth_m:
-                extracted_metrics.append(rev_growth_m.group(1).strip())
+            if is_revenue_causal:
+                for citation_text in citation_texts:
+                    rev_growth_m = re.search(
+                        r"([^.!?\n]*\b(?:revenue|sales|turnover|top line)\b[^.!?\n]*\b(?:grew|expanded|increased|declined|decreased|rose|fell)\b[^.!?\n]*)",
+                        citation_text,
+                        re.I,
+                    )
+                    if rev_growth_m:
+                        extracted_metrics.append(rev_growth_m.group(1).strip())
 
             factor_candidates = []
-            for block in combined_text.splitlines():
+            for block in citation_texts:
                 block_clean = block.strip()
                 if not block_clean or len(block_clean) < 25:
                     continue
@@ -1942,7 +2040,8 @@ class ResearchAgent:
                     if len(s_clean) < 25:
                         continue
                     s_low = s_clean.lower()
-                    if any(w in s_low for w in [
+                    has_target_metric = any(term in s_low for term in target_terms)
+                    if has_target_metric and any(w in s_low for w in [
                         "driven by", "due to", "attributed to", "primarily reflected", "primarily due",
                         "benefited from", "impacted by", "expansion in", "growth in", "higher margin",
                         "operating efficiency", "productivity", "cost savings", "investments in",
@@ -1958,7 +2057,7 @@ class ResearchAgent:
                     distinct_factors.append(f)
                     seen_factor_snippets.add(f_key)
 
-            if distinct_factors or extracted_metrics:
+            if distinct_factors or extracted_metrics or (intent.is_causal and is_revenue_causal):
                 def find_cit_for_text(target_snippet: str) -> str:
                     for cit in all_citations:
                         words = [w for w in target_snippet.lower().split() if len(w) > 4]
@@ -1969,9 +2068,11 @@ class ResearchAgent:
                 lines = ["### Answer"]
                 comp_name = intent.target_company or (all_citations[0].company if all_citations else "The company")
                 if distinct_factors:
-                    lines.append(f"{comp_name}'s financial performance and margin changes were primarily driven by operational mix changes, segment growth dynamics, and cost management disclosed in management discussion.")
+                    lines.append(f"{comp_name}'s change in {('revenue' if is_revenue_causal else 'the requested metric')} is supported only by the disclosed evidence below.")
+                elif is_revenue_causal:
+                    lines.append("The report confirms the revenue movement, but the retrieved evidence does not explicitly identify its cause. Therefore, a specific causal explanation cannot be established from the available evidence.")
                 else:
-                    lines.append(f"Disclosed filings detail key operational and financial movements for {comp_name}.")
+                    lines.append(f"The report confirms movement in the requested metric for {comp_name}, but the retrieved evidence does not explicitly identify its cause.")
 
                 lines.append("")
                 lines.append("### Key Evidence")
@@ -1981,7 +2082,7 @@ class ResearchAgent:
                 else:
                     lines.append("- Operating performance reflects underlying segment revenue changes and expense management reported in the filing.")
                 if distinct_factors:
-                    lines.append(f"- Management discussion identified key operational drivers including {distinct_factors[0][:80].rstrip('.,')}...")
+                    lines.append(f"- {distinct_factors[0].rstrip('.,')}")
 
                 lines.append("")
                 lines.append("### Main Factors")
@@ -2004,7 +2105,7 @@ class ResearchAgent:
 
                         lines.append(f"{idx}. **{title}:** {factor_text} Source: {cit_str}")
                 else:
-                    lines.append("1. **Operational Drivers:** Disclosed operational drivers contributed to year-over-year movements.")
+                    lines.append("1. No document-supported causal factor was identified.")
 
                 lines.append("")
                 lines.append("### Largest Impact")
@@ -2012,7 +2113,7 @@ class ResearchAgent:
                 if largest_stated:
                     lines.append(f"Based on disclosed filings, the primary driver identified by management was: {largest_stated[0]}")
                 else:
-                    lines.append("The available filing disclosures identify multiple contributing factors, but do not provide sufficient quantitative breakdown to definitively rank the single largest individual impact.")
+                    lines.append("The available filing disclosures do not establish a specific causal driver or provide sufficient quantitative breakdown to rank one.")
 
                 lines.append("")
                 lines.append("### Source Citations")

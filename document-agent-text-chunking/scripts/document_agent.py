@@ -1592,6 +1592,9 @@ class DocumentAgent:
             ("Revenue", r"(?:total )?revenues?|sales"),
             ("Operating Income", r"operating income|operating profit|ebit"),
             ("Net Income", r"net income|net earnings|net profit"),
+            ("Pre-tax Income", r"pre[- ]tax income|income before tax|profit before tax"),
+            ("Income Tax Expense", r"income tax expense|income taxes"),
+            ("Cost of Revenue", r"cost of revenue|cost of sales|cost of goods sold"),
             ("Total Assets", r"total assets"),
             ("Total Liabilities", r"total liabilities"),
             ("Debt", r"(?:total )?debt|borrowings?"),
@@ -1641,6 +1644,53 @@ class DocumentAgent:
                     if val and re.search(r"\d", val) and not re.fullmatch(r"(?:19|20)\d{2}", val):
                         metrics.append(f"{label}: {val}")
                         seen_names.add(label)
+
+        # PDF table extraction often puts the metric label, year headers, and
+        # values on separate lines instead of retaining delimiters.
+        lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        for index, line in enumerate(lines):
+            for label, pattern in metric_names:
+                if label in seen_names or not re.fullmatch(rf"(?:{pattern})", line, re.I):
+                    continue
+                for candidate_line in lines[index + 1:index + 4]:
+                    values = re.findall(
+                        r"(?<!\d)(?:[-(]?[\$€£₹]?\s*\d[\d,]*(?:\.\d+)?\s*(?:million|billion|thousand|bn|m|b)?%?\)?)",
+                        candidate_line,
+                        re.I,
+                    )
+                    value = next(
+                        (item.strip() for item in values if not re.fullmatch(r"(?:19|20)\d{2}", item.strip())),
+                        None,
+                    )
+                    if value:
+                        metrics.append(f"{label}: {value.strip('() ')}")
+                        seen_names.add(label)
+                        break
+
+        # A row may contain the label and its values without a delimiter.
+        for line in lines:
+            for label, pattern in metric_names:
+                if label in seen_names:
+                    continue
+                row_match = re.match(
+                    rf"^\s*(?:{pattern})\s+(?P<values>.+?)\s*$",
+                    line,
+                    re.I,
+                )
+                if not row_match or re.search(r"[.!?]", line):
+                    continue
+                values = re.findall(
+                    r"(?<!\d)(?:[-(]?[\$€£₹]?\s*\d[\d,]*(?:\.\d+)?\s*(?:million|billion|thousand|bn|m|b)?%?\)?)",
+                    row_match.group("values"),
+                    re.I,
+                )
+                value = next(
+                    (item.strip() for item in values if not re.fullmatch(r"(?:19|20)\d{2}", item.strip())),
+                    None,
+                )
+                if value:
+                    metrics.append(f"{label}: {value.strip('() ')}")
+                    seen_names.add(label)
 
         return ", ".join(metrics)
 
@@ -1818,7 +1868,16 @@ class DocumentAgent:
 
         # Classify table_type based on specific tables present in chunk
         table_type = ""
-        if re.search(r"\b(?:table [a-z0-9]:\s*)?revenue by (?:business )?segment\b|\bsegment performance summary\b|\bsegment (?:revenue|breakdown)\b", full_text_lower):
+        section_types = {
+            "Income Statement": bool(re.search(r"\b(?:statements? of )?(?:income|operations|earnings)\b|\bincome statements?\b|\bgross profit\b|\boperating income\b.*\bnet income\b", full_text_lower, re.S)),
+            "Balance Sheet": bool(re.search(r"\bbalance sheets?\b|\btotal assets\b.*\btotal liabilities\b", full_text_lower, re.S)),
+            "Cash Flow": bool(re.search(r"\b(?:statements? of )?cash flows?\b|\bnet cash from operating activities\b|\bfree cash flow\b", full_text_lower, re.S)),
+            "Segment Revenue": bool(re.search(r"\brevenue by (?:business )?segment\b|\bsegment performance summary\b|\bsegment (?:revenue|breakdown)\b", full_text_lower)),
+            "Debt Schedule": bool(re.search(r"\b(?:detailed )?debt schedule\b|\bdebt maturity schedule\b", full_text_lower)),
+        }
+        if sum(section_types.values()) > 1:
+            table_type = "Financial Table"
+        elif re.search(r"\b(?:table [a-z0-9]:\s*)?revenue by (?:business )?segment\b|\bsegment performance summary\b|\bsegment (?:revenue|breakdown)\b", full_text_lower):
             table_type = "Segment Revenue"
         elif re.search(r"\b(?:table [a-z0-9]:\s*)?working capital components\b|\bnet working capital\b", full_text_lower):
             table_type = "Working Capital"

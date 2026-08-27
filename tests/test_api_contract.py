@@ -57,6 +57,15 @@ def test_upload_analysis_returns_canonical_success_response():
     assert ext_body.get("operating_income") == "$2.1 billion"
     assert ext_body.get("total_assets") == "$22.6 billion"
     assert ext_body.get("total_liabilities") == "$9.8 billion"
+    assert "yearly_metrics" not in ext_body
+    assert "financial_values" not in ext_body
+    assert "observations" not in ext_body
+    assert "detailed_metrics" not in ext_body
+    assert "source_text" not in ext_body
+    assert "numeric_value" not in json.dumps(ext_body)
+    revenue_metric = next(item for item in ext_body["metrics"] if item["metric"] == "Revenue")
+    assert revenue_metric["value"] == "$15.3 billion"
+    assert "provenance" in revenue_metric
 
     # Research endpoint verification
     res_resp = client.get(f"/analysis/{analysis_id}/research")

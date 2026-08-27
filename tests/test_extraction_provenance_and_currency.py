@@ -233,6 +233,22 @@ def test_extraction_response_contract_pydantic_validation():
     assert len(resp_obj.detailed_metrics) > 0
 
 
+def test_internal_extraction_fields_are_excluded_from_public_model_serialization():
+    res = extract_report_metrics(
+        "Revenue was $10 million.",
+        metadata={"analysis_id": "test-123", "document_id": "doc-456"},
+        enable_llm=False,
+    )
+    public_payload = ExtractionResponse.model_validate(res).model_dump(exclude_none=True)
+
+    assert "yearly_metrics" not in public_payload
+    assert "detailed_metrics" not in public_payload
+    assert "observations" not in public_payload
+    assert "traceability" not in public_payload
+    assert res["observations"]
+    assert res["observations"][0]["numeric_value"] == 10.0
+
+
 def test_compare_company_metrics_with_new_extraction():
     """Verify that comparison agent can parse extracted string metrics without error."""
     company_a = {

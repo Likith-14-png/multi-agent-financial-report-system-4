@@ -257,21 +257,21 @@ class ExtractionResponse(BaseModel):
     basic_eps: Optional[Any] = None
     diluted_eps: Optional[Any] = None
     trend_eps: Optional[Any] = None
-    yearly_metrics: Optional[Dict[str, Any]] = None
+    yearly_metrics: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
     income_statement: Optional[Dict[str, Any]] = None
     balance_sheet: Optional[Dict[str, Any]] = None
     cash_flow_statement: Optional[Dict[str, Any]] = None
     segment_metrics: Optional[Dict[str, Any]] = None
     accounting_information: Optional[List[Dict[str, Any]]] = None
     risk_related_metrics: Optional[List[Dict[str, Any]]] = None
-    detailed_metrics: Optional[List[Dict[str, Any]]] = None
-    observations: Optional[List[Dict[str, Any]]] = None
-    traceability: Optional[Dict[str, Any]] = None
+    detailed_metrics: Optional[List[Dict[str, Any]]] = Field(default=None, exclude=True)
+    observations: Optional[List[Dict[str, Any]]] = Field(default=None, exclude=True)
+    traceability: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
     source_chunks: Optional[List[str]] = None
     source_file: Optional[str] = None
     source: Optional[str] = None
     chunk_id: Optional[str] = None
-    source_text: Optional[str] = None
+    source_text: Optional[str] = Field(default=None, exclude=True)
 
 
 class ResearchResponse(BaseModel):
