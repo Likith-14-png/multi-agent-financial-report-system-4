@@ -241,7 +241,6 @@ def test_table_values_respect_fy2024_and_fy2025_headers():
         "Net Income": "$1.5 billion",
         "Total Assets": "$22.6 billion",
         "Total Liabilities": "$9.8 billion",
-        "Cash Flow": "$1.9 billion",
     }
 
     for metric_name, current_value in expected_current.items():
@@ -255,7 +254,7 @@ def test_table_values_respect_fy2024_and_fy2025_headers():
     assert result["net_income"] == "$1.5 billion"
     assert result["total_assets"] == "$22.6 billion"
     assert result["total_liabilities"] == "$9.8 billion"
-    assert result["cash_flow"] == "$1.9 billion"
+    assert result["cash_flow"] is None
 
     assert result["yearly_metrics"]["Revenue"][0]["value"] == "$13.8 billion"
     assert result["yearly_metrics"]["Revenue"][1]["value"] == "$15.3 billion"
@@ -267,8 +266,7 @@ def test_table_values_respect_fy2024_and_fy2025_headers():
     assert result["yearly_metrics"]["Total Assets"][1]["value"] == "$22.6 billion"
     assert result["yearly_metrics"]["Total Liabilities"][0]["value"] == "$9.1 billion"
     assert result["yearly_metrics"]["Total Liabilities"][1]["value"] == "$9.8 billion"
-    assert result["yearly_metrics"]["Cash Flow"][0]["value"] == "$1.6 billion"
-    assert result["yearly_metrics"]["Cash Flow"][1]["value"] == "$1.9 billion"
+    assert "Cash Flow" not in result["yearly_metrics"]
 
     assert "Revenue 2025 = 13.8" not in str(result)
     assert "Operating Income 2025 = 1.8" not in str(result)
@@ -290,7 +288,7 @@ def test_growth_percentage_is_not_treated_as_the_metric_value():
     assert result["revenue"] == "$18.4 billion"
     assert result["operating_income"] == "$3.0 billion"
     assert result["net_income"] == "$2.2 billion"
-    assert result["cash_flow"] == "$2.8 billion"
+    assert result["cash_flow"] is None
 
     assert result["yearly_metrics"]["Revenue"][0]["value"] == "$16.35 billion"
     assert result["yearly_metrics"]["Revenue"][1]["value"] == "$18.4 billion"
@@ -298,8 +296,7 @@ def test_growth_percentage_is_not_treated_as_the_metric_value():
     assert result["yearly_metrics"]["Operating Income"][1]["value"] == "$3.0 billion"
     assert result["yearly_metrics"]["Net Income"][0]["value"] == "$1.8 billion"
     assert result["yearly_metrics"]["Net Income"][1]["value"] == "$2.2 billion"
-    assert result["yearly_metrics"]["Cash Flow"][0]["value"] == "$2.3 billion"
-    assert result["yearly_metrics"]["Cash Flow"][1]["value"] == "$2.8 billion"
+    assert "Cash Flow" not in result["yearly_metrics"]
 
 
 def test_yearly_metrics_follow_actual_fy_headers_and_keep_current_year_last():

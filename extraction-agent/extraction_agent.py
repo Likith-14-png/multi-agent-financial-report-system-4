@@ -284,6 +284,13 @@ METRIC_TAXONOMY: Dict[str, Dict[str, Any]] = {
         "is_per_share": False,
         "is_percent": False,
     },
+    "cash_flow": {
+        "canonical_name": "Cash Flow",
+        "aliases": [r"\bcash flow\b"],
+        "category": "cash_flow",
+        "is_per_share": False,
+        "is_percent": False,
+    },
     "free_cash_flow": {
         "canonical_name": "Free Cash Flow",
         "aliases": [
@@ -1091,6 +1098,11 @@ def _classify_metric_candidate(
             return None
         if "operating" not in lowered and "cash from operations" not in lowered and "cash flow from operations" not in lowered:
             return None
+    if metric_key == "cash_flow" and re.search(
+        r"\b(?:operating|free|investing|financing)\s+cash flow\b|\bcash flow statement\b",
+        lowered,
+    ):
+        return None
     if metric_key == "total_assets" and "total assets" not in lowered and alias_lower.strip() != r"\btotal assets\b":
         return None
     if metric_key == "total_liabilities" and "total liabilities" not in lowered and alias_lower.strip() != r"\btotal liabilities\b":
@@ -1123,8 +1135,8 @@ def _canonical_yearly_metric_name(metric_name: str) -> str:
         "total equity": "Total Equity",
         "total debt": "Total Debt",
         "cash flow": "Cash Flow",
-        "cash flow from operations": "Cash Flow",
-        "operating cash flow": "Cash Flow",
+        "cash flow from operations": "Operating Cash Flow",
+        "operating cash flow": "Operating Cash Flow",
         "free cash flow": "Free Cash Flow",
         "r&d expense": "R&D Expense",
         "research and development": "R&D Expense",
@@ -1193,37 +1205,89 @@ def _find_grounded_chunk_for_observation(
         matching_line_index = -1
         for line_index, line in enumerate(lines):
             line_lower = line.lower()
+            number_tokens = re.findall(r"(?<!\d)\d[\d,]*(?:\.\d+)?", line)
+            exact_number_match = any(re.sub(r"[^\d.]", "", token) == raw_digits for token in number_tokens) if metric_name == "free_cash_flow" else False
             if (num_str and num_str in line) or (raw_digits and raw_digits in re.sub(r"[^\d.]", "", line)) or (raw_val.lower() in line_lower):
-                matching_line = line.strip()
-                matching_line_index = line_index
+                if metric_name == "free_cash_flow" and not exact_number_match and not any(re.search(alias, line, re.I) for alias in aliases):
+                    continue
                 if any(re.search(alias, line, re.I) for alias in aliases):
+                    matching_line = line.strip()
+                    matching_line_index = line_index
                     found_in_same_line = True
                     score += 15.0
                     break
+                if metric_name == "revenue":
+                    prior_window = 12
+                    prior_label_index = next(
+                        (
+                            prior_index
+                            for prior_index in range(line_index - 1, max(-1, line_index - prior_window), -1)
+                            if any(re.search(alias, lines[prior_index], re.I) for alias in aliases)
+                        ),
+                        None,
+                    )
+                    if prior_label_index is not None:
+                        matching_line = line.strip()
+                        matching_line_index = line_index
+                        break
+                if metric_name == "free_cash_flow" and exact_number_match:
+                    prior_label_index = next(
+                        (
+                            prior_index
+                            for prior_index in range(line_index - 1, max(-1, line_index - 12), -1)
+                            if any(re.search(alias, lines[prior_index], re.I) for alias in aliases)
+                        ),
+                        None,
+                    )
+                    if prior_label_index is not None:
+                        matching_line = line.strip()
+                        matching_line_index = line_index
+                        break
+                if matching_line_index < 0:
+                    matching_line = line.strip()
+                    matching_line_index = line_index
         occurrence_index = matching_line_index
         if occurrence_index >= 0 and not any(re.search(alias, lines[occurrence_index], re.I) for alias in aliases):
-            for prior_index in range(occurrence_index - 1, max(-1, occurrence_index - 4), -1):
+            prior_window = 12 if metric_name == "revenue" else 4
+            for prior_index in range(occurrence_index - 1, max(-1, occurrence_index - prior_window), -1):
                 if any(re.search(alias, lines[prior_index], re.I) for alias in aliases):
                     occurrence_index = prior_index
                     break
+        if metric_name == "operating_cash_flow" and occurrence_index >= 0 and occurrence_index != matching_line_index:
+            score += 15.0
+        if metric_name == "free_cash_flow" and occurrence_index >= 0 and occurrence_index != matching_line_index:
+            score += 15.0
+        if metric_name == "revenue" and occurrence_index >= 0 and occurrence_index != matching_line_index:
+            score += 15.0
         current_section = sec_title
         occurrence_section = sec_title
+        occurrence_page = None
         for line_index, line in enumerate(lines):
             heading = re.sub(r"^[\d.)\s:-]+", "", line).strip()
+            if line_index <= occurrence_index:
+                page_match = re.fullmatch(r"(?i)page\s+(\d+)", heading)
+                if page_match:
+                    occurrence_page = int(page_match.group(1))
             if re.fullmatch(
                 r"(?i)(?:consolidated\s+)?(?:income|profit and loss|statement of operations|operations)\s+statement|"
                 r"(?:consolidated\s+)?balance sheet|(?:consolidated\s+)?cash flow statement|"
-                r"accounting notes(?: and risk indicators)?|risk indicators?",
+                r"accounting notes(?: and risk indicators)?|risk indicators?|"
+                r"(?:debt|liquidity|capital structure)[^:]*",
                 heading,
+            ) or (
+                metric_name in {"operating_cash_flow", "free_cash_flow"}
+                and re.fullmatch(r"(?i)(?:consolidated\s+)?cash flows?", heading)
             ):
                 current_section = heading
             if line_index == occurrence_index:
                 occurrence_section = current_section
-        if category == "income_statement" and any(w in sec_title or w in c_text_lower[:150] for w in ["profit", "loss", "income statement", "operations", "financial performance", "p&l"]):
+        occurrence_context = " ".join(lines[max(0, occurrence_index - 1): occurrence_index + 2]).lower() if occurrence_index >= 0 else ""
+        ranking_context = f"{occurrence_section} {occurrence_context}" if metric_name in {"revenue", "operating_cash_flow", "free_cash_flow"} else f"{sec_title} {c_text_lower[:150]}"
+        if category == "income_statement" and any(w in ranking_context for w in ["profit", "loss", "income statement", "operations", "financial performance", "p&l"]):
             score += 8.0
-        elif category == "balance_sheet" and any(w in sec_title or w in c_text_lower[:150] for w in ["balance sheet", "financial position", "assets", "liabilities"]):
+        elif category == "balance_sheet" and any(w in ranking_context for w in ["balance sheet", "financial position", "assets", "liabilities"]):
             score += 8.0
-        elif category == "cash_flow" and any(w in sec_title or w in c_text_lower[:150] for w in ["cash flow", "cash flows", "operating activities"]):
+        elif category == "cash_flow" and any(w in ranking_context for w in ["cash flow", "cash flows", "operating activities"]):
             score += 8.0
         if target_year_str and target_year_str in c_text:
             score += 5.0
@@ -1233,8 +1297,13 @@ def _find_grounded_chunk_for_observation(
         if score > best_score and score >= 10.0:
             best_score = score
             best_chunk_id = chunk.get("chunk_id") or c_meta.get("chunk_id")
-            best_page = chunk.get("page_start") or c_meta.get("page_start") or c_meta.get("page_number") or 1
-            best_snippet = (matching_line if matching_line else c_text[:200]).replace("\n", " ")
+            best_page = occurrence_page if occurrence_page is not None else (
+                chunk.get("page_start") or c_meta.get("page_start") or c_meta.get("page_number") or 1
+            )
+            evidence_lines = [matching_line] if matching_line else [c_text[:200]]
+            if metric_name in {"revenue", "operating_cash_flow", "free_cash_flow"} and occurrence_index >= 0 and occurrence_index != matching_line_index:
+                evidence_lines.insert(0, lines[occurrence_index])
+            best_snippet = " ".join(evidence_lines).replace("\n", " ")
             best_section = occurrence_section
     return best_chunk_id, best_page, best_snippet, best_score, best_section
 
@@ -1660,14 +1729,6 @@ def _extract_table_yearly_metrics_legacy(
                     {"year": 2024, **_enrich_yearly_value(values[0], currency, unit)},
                     {"year": 2025, **_enrich_yearly_value(values[1], currency, unit)},
                 ]
-        elif label.lower() == "operating cash flow" and "Cash Flow" not in yearly:
-            fallback_years = [2024, 2025]
-            if len(header_years) >= 2:
-                fallback_years = [int(header_years[i]) for i in range(2)]
-            yearly["Cash Flow"] = [
-                {"year": fallback_years[0], "value": values[0] if values else ""},
-                {"year": fallback_years[1], "value": values[1] if len(values) > 1 else ""},
-            ]
     return yearly
 
 
@@ -1718,8 +1779,9 @@ def _extract_field_observations(
                         is_percent=is_percent or spec.get("is_percent", False),
                     )
                     classified_metric = _classify_metric_candidate(metric_key, sentence, alias, parsed)
-                    if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and parsed["raw_value"] not in seen_raw:
-                        seen_raw.add(parsed["raw_value"])
+                    if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", sentence, re.I)) or parsed["raw_value"] not in seen_raw):
+                        if classified_metric != "revenue":
+                            seen_raw.add(parsed["raw_value"])
                         obs = dict(parsed)
                         obs.update({
                             "metric_name": classified_metric,
@@ -1751,8 +1813,9 @@ def _extract_field_observations(
                     if parsed:
                         sentence = f"{sentence} {continuation.group(1)}"
             classified_metric = _classify_metric_candidate(metric_key, sentence, alias, parsed)
-            if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and parsed["raw_value"] not in seen_raw:
-                seen_raw.add(parsed["raw_value"])
+            if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", sentence, re.I)) or parsed["raw_value"] not in seen_raw):
+                if classified_metric != "revenue":
+                    seen_raw.add(parsed["raw_value"])
                 obs = dict(parsed)
                 obs["metric_name"] = classified_metric
                 obs["canonical_label"] = "Segment Revenue" if classified_metric == "segment_revenue" else spec.get("canonical_name", metric_key.replace("_", " ").title())
@@ -1777,8 +1840,9 @@ def _extract_field_observations(
             )
             candidate_context = text[max(0, m.start() - 80):m.end()]
             classified_metric = _classify_metric_candidate(metric_key, candidate_context, alias, parsed)
-            if classified_metric and not _is_temporal_metric_candidate(text, m.start(), parsed) and parsed["raw_value"] not in seen_raw:
-                seen_raw.add(parsed["raw_value"])
+            if classified_metric and not _is_temporal_metric_candidate(text, m.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", text[max(0, m.start() - 80):m.end()], re.I)) or parsed["raw_value"] not in seen_raw):
+                if classified_metric != "revenue":
+                    seen_raw.add(parsed["raw_value"])
                 obs = dict(parsed)
                 obs["metric_name"] = classified_metric
                 obs["canonical_label"] = "Segment Revenue" if classified_metric == "segment_revenue" else spec.get("canonical_name", metric_key.replace("_", " ").title())
@@ -1995,8 +2059,6 @@ def _extract_report_metrics(
                 for year in sorted(observations_by_year)
             ]
             yearly_metrics[label] = yearly_series
-            if metric_key == "operating_cash_flow":
-                yearly_metrics["Cash Flow"] = yearly_series
     canonical_metrics: Dict[str, Optional[str]] = {}
     canonical_observations: Dict[str, Dict[str, Any]] = {}
     for metric_key in (
