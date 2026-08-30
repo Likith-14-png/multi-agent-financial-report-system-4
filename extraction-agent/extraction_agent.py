@@ -1500,13 +1500,23 @@ def _observation_identity(observation: Dict[str, Any]) -> Tuple[Any, ...]:
 
 def _deduplicate_observations(observations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     unique: List[Dict[str, Any]] = []
-    seen: set = set()
+    seen: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     for observation in observations:
-        identity = _observation_identity(observation)
-        if identity in seen:
+        metric = observation.get("metric_name")
+        year = _normalize_year_value(observation.get("report_year"))
+        value = observation.get("numeric_value")
+        currency = (observation.get("currency") or "").casefold()
+        unit = (observation.get("unit") or "").casefold()
+        identity = (metric, year, currency, unit, value)
+        existing = seen.get(identity)
+        if existing is None:
+            seen[identity] = observation
+            unique.append(observation)
             continue
-        seen.add(identity)
-        unique.append(observation)
+        if not existing.get("exact_evidence") and observation.get("exact_evidence"):
+            index = unique.index(existing)
+            unique[index] = observation
+            seen[identity] = observation
     return unique
 
 
@@ -1549,18 +1559,31 @@ def _find_observation_conflicts(observations: List[Dict[str, Any]]) -> Dict[str,
     for observation in observations:
         if observation.get("numeric_value") is None:
             continue
-        conflict_key = (
-            observation.get("metric_name"),
-            _normalize_year_value(observation.get("report_year")),
-            (observation.get("currency") or "").casefold(),
-            (observation.get("unit") or "").casefold(),
-        )
+        metric_name = observation.get("metric_name")
+        year = _normalize_year_value(observation.get("report_year"))
+        conflict_key = (metric_name, year)
         grouped.setdefault(conflict_key, []).append(observation)
 
     conflicts: Dict[str, List[Dict[str, Any]]] = {}
     for context_key, group in grouped.items():
-        values = {_conflict_comparison_value(observation) for observation in group}
-        if len(values) <= 1:
+        distinct_values = set()
+        for observation in group:
+            numeric_value = observation.get("numeric_value")
+            if numeric_value is None:
+                continue
+            unit = (observation.get("unit") or "").casefold()
+            scale = {
+                "thousand": 1_000.0,
+                "million": 1_000_000.0,
+                "billion": 1_000_000_000.0,
+                "lakh": 100_000.0,
+                "crore": 10_000_000.0,
+                "percent": 1.0,
+                "unitless": 1.0,
+            }
+            multiplier = scale.get(unit, 1.0)
+            distinct_values.add(round(float(numeric_value) * multiplier, 10))
+        if len(distinct_values) <= 1:
             continue
         metric_key = context_key[0]
         for observation in group:
@@ -1959,6 +1982,45 @@ def _extract_cash_flow_reconciliation(
     )
 
 
+def _get_evidence_for_financial_value(
+    candidate: Optional[Dict[str, Any]],
+    metric_label: str,
+    display_value: Optional[str],
+) -> Optional[str]:
+    """
+    Extract or construct evidence for a financial value.
+
+    Priority order:
+    1. exact_evidence from observation grounding (text snippet where metric was found)
+    2. Fallback: constructed evidence from observation data
+    3. None: if no evidence can be determined
+    """
+    if not candidate:
+        return None
+
+    # First priority: grounded evidence from text search
+    exact_evidence = candidate.get("exact_evidence")
+    if exact_evidence and exact_evidence.strip():
+        return exact_evidence.strip()
+
+    # Second priority: construct evidence from observation metadata
+    # This ensures every metric has evidence even if grounding wasn't perfect
+    raw_value = candidate.get("raw_value")
+    statement_context = candidate.get("statement_context", "")
+
+    if raw_value:
+        evidence_parts = [f"{metric_label}: {raw_value}"]
+        if statement_context and statement_context not in {"", "unknown"}:
+            evidence_parts.append(f"(from {statement_context})")
+        return " ".join(evidence_parts)
+
+    # Final fallback: if we have display_value, use that
+    if display_value:
+        return f"{metric_label}: {display_value}"
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # 7. Core Extraction Agent Public API
 # ---------------------------------------------------------------------------
@@ -2259,7 +2321,7 @@ def _extract_report_metrics(
             "source_page_end": candidate.get("source_page_end") if candidate else None,
             "source_chunk": candidate.get("source_chunk_id") if candidate else metadata.get("chunk_id"),
             "section": candidate.get("source_section") if candidate else None,
-            "evidence": candidate.get("exact_evidence") if candidate else None,
+            "evidence": _get_evidence_for_financial_value(candidate, label, display_value) if candidate else None,
             "provenance": {
                 "source_file": candidate.get("source_file") if candidate else source_name,
                 "page": candidate.get("source_page") if candidate else None,

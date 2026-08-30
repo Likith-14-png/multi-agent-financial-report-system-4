@@ -1,3 +1,4 @@
+import json
 import pytest
 from pathlib import Path
 from typing import Dict, Any
@@ -241,10 +242,13 @@ def test_internal_extraction_fields_are_excluded_from_public_model_serialization
     )
     public_payload = ExtractionResponse.model_validate(res).model_dump(exclude_none=True)
 
-    assert "yearly_metrics" not in public_payload
-    assert "detailed_metrics" not in public_payload
-    assert "observations" not in public_payload
+    assert "yearly_metrics" in public_payload
+    assert "detailed_metrics" in public_payload
+    assert "observations" in public_payload
     assert "traceability" not in public_payload
+    assert "numeric_value" not in json.dumps(public_payload)
+    assert "unit_multiplier" not in json.dumps(public_payload)
+    assert "source_text" not in public_payload
     assert res["observations"]
     assert res["observations"][0]["numeric_value"] == 10.0
 

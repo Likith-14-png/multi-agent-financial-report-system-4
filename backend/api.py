@@ -236,6 +236,84 @@ def _normalize_extraction(raw_extraction: Any) -> dict[str, Any]:
     }
 
 
+def _public_provenance(record: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+    provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+    source_file = provenance.get("source_file") or record.get("source_file") or record.get("source")
+    page = provenance.get("page") or record.get("source_page") or record.get("page_number")
+    chunk_id = provenance.get("chunk_id") or record.get("source_chunk_id") or record.get("chunk_id") or record.get("source_chunk")
+    section = provenance.get("section") or record.get("source_section") or record.get("section")
+    return {
+        "source_file": source_file,
+        "page": page,
+        "chunk_id": chunk_id,
+        "section": section,
+    }
+
+
+def _public_yearly_series(series: Any) -> List[Dict[str, Any]]:
+    if not isinstance(series, list):
+        return []
+    public_series: List[Dict[str, Any]] = []
+    for entry in series:
+        if not isinstance(entry, dict):
+            continue
+        year = entry.get("year") or entry.get("report_year") or entry.get("period")
+        value = entry.get("value") or entry.get("display_value") or entry.get("raw_value") or entry.get("amount")
+        if year is None and value is None:
+            continue
+        public_series.append({
+            "year": year,
+            "period": year,
+            "value": value,
+            "currency": entry.get("currency"),
+            "unit": entry.get("unit") or entry.get("unit_scale"),
+            "source_file": entry.get("source_file") or entry.get("source"),
+            "page": entry.get("source_page") or entry.get("page_number"),
+            "section": entry.get("source_section") or entry.get("section"),
+            "chunk_id": entry.get("source_chunk_id") or entry.get("chunk_id"),
+            "evidence": entry.get("evidence") or entry.get("exact_evidence"),
+            "provenance": _public_provenance(entry),
+        })
+    return public_series
+
+
+def _public_metric_observation(entry: Any) -> Dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {}
+    metric_name = entry.get("metric_name") or entry.get("metric") or entry.get("normalized_name") or entry.get("name") or entry.get("canonical_label")
+    year = entry.get("report_year") or entry.get("year") or entry.get("period")
+    value = entry.get("value") or entry.get("display_value") or entry.get("raw_value") or entry.get("amount")
+    metric_label = entry.get("canonical_label") or entry.get("metric") or metric_name
+    observation: Dict[str, Any] = {
+        "metric": metric_label,
+        "metric_name": metric_name,
+        "canonical_label": metric_label,
+        "value": value,
+        "raw_value": value,
+        "currency": entry.get("currency"),
+        "unit": entry.get("unit") or entry.get("unit_scale"),
+        "period": year,
+        "year": year,
+        "report_year": year,
+        "source_file": entry.get("source_file") or entry.get("source"),
+        "page": entry.get("source_page") or entry.get("page_number"),
+        "section": entry.get("source_section") or entry.get("section"),
+        "chunk_id": entry.get("source_chunk_id") or entry.get("chunk_id"),
+        "evidence": entry.get("evidence") or entry.get("exact_evidence"),
+        "provenance": _public_provenance(entry),
+    }
+    if isinstance(entry.get("provenance"), dict):
+        observation["provenance"] = {
+            "source_file": entry["provenance"].get("source_file") or observation.get("source_file"),
+            "page": entry["provenance"].get("page") or observation.get("page"),
+            "chunk_id": entry["provenance"].get("chunk_id") or observation.get("chunk_id"),
+            "section": entry["provenance"].get("section") or observation.get("section"),
+        }
+    return observation
+
+
 def _public_extraction_payload(raw_extraction: Any, analysis_id: str, company_name: Any, report_year: Any) -> dict[str, Any]:
     """Project rich internal extraction data onto the public extraction contract."""
     raw = raw_extraction if isinstance(raw_extraction, dict) else {}
@@ -262,6 +340,29 @@ def _public_extraction_payload(raw_extraction: Any, analysis_id: str, company_na
             },
         })
 
+    yearly_metrics = raw.get("yearly_metrics") if isinstance(raw.get("yearly_metrics"), dict) else {}
+    public_yearly_metrics: Dict[str, Any] = {}
+    for metric_name, metric_series in yearly_metrics.items():
+        public_series = _public_yearly_series(metric_series)
+        if public_series:
+            public_yearly_metrics[metric_name] = public_series
+
+    observations = raw.get("observations") if isinstance(raw.get("observations"), list) else []
+    if not observations and isinstance(raw.get("detailed_metrics"), list):
+        observations = raw.get("detailed_metrics")
+    public_observations = []
+    for observation in observations:
+        public_observation = _public_metric_observation(observation)
+        if public_observation:
+            public_observations.append(public_observation)
+
+    detailed_metrics = raw.get("detailed_metrics") if isinstance(raw.get("detailed_metrics"), list) else []
+    public_detailed_metrics = []
+    for item in detailed_metrics:
+        public_observation = _public_metric_observation(item)
+        if public_observation:
+            public_detailed_metrics.append(public_observation)
+
     scalar_keys = (
         "revenue", "gross_profit", "operating_income", "pretax_income", "net_income",
         "total_assets", "total_liabilities", "total_equity", "cash_flow",
@@ -277,6 +378,9 @@ def _public_extraction_payload(raw_extraction: Any, analysis_id: str, company_na
         "source": raw.get("source"),
         "source_file": raw.get("source_file") or raw.get("source"),
         "chunk_id": raw.get("chunk_id"),
+        "yearly_metrics": public_yearly_metrics or None,
+        "observations": public_observations or None,
+        "detailed_metrics": public_detailed_metrics or None,
     }
     payload.update({key: raw.get(key) for key in scalar_keys})
     return payload

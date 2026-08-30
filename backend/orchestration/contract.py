@@ -234,8 +234,41 @@ class AnalysisStatusResponse(BaseModel):
     progress: int = Field(100, description="Estimated progress percentage (0-100)")
 
 
+_PUBLIC_EXTRACTION_INTERNAL_KEYS = {
+    "traceability",
+    "source_text",
+    "numeric_value",
+    "unit_multiplier",
+    "normalized_base_value",
+    "source_chunk_id",
+    "source_chunk",
+    "raw_numeric_value",
+    "raw_value",
+}
+
+
+def _sanitize_public_extraction_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: Dict[str, Any] = {}
+        for key, item in value.items():
+            if key in _PUBLIC_EXTRACTION_INTERNAL_KEYS:
+                continue
+            cleaned[key] = _sanitize_public_extraction_payload(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_sanitize_public_extraction_payload(item) for item in value]
+    return value
+
+
 class ExtractionResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_internal_extraction_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _sanitize_public_extraction_payload(value)
+        return value
 
     analysis_id: Optional[str] = None
     document_id: Optional[str] = None
@@ -257,15 +290,15 @@ class ExtractionResponse(BaseModel):
     basic_eps: Optional[Any] = None
     diluted_eps: Optional[Any] = None
     trend_eps: Optional[Any] = None
-    yearly_metrics: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
+    yearly_metrics: Optional[Dict[str, Any]] = None
     income_statement: Optional[Dict[str, Any]] = None
     balance_sheet: Optional[Dict[str, Any]] = None
     cash_flow_statement: Optional[Dict[str, Any]] = None
     segment_metrics: Optional[Dict[str, Any]] = None
     accounting_information: Optional[List[Dict[str, Any]]] = None
     risk_related_metrics: Optional[List[Dict[str, Any]]] = None
-    detailed_metrics: Optional[List[Dict[str, Any]]] = Field(default=None, exclude=True)
-    observations: Optional[List[Dict[str, Any]]] = Field(default=None, exclude=True)
+    detailed_metrics: Optional[List[Dict[str, Any]]] = None
+    observations: Optional[List[Dict[str, Any]]] = None
     traceability: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
     source_chunks: Optional[List[str]] = None
     source_file: Optional[str] = None

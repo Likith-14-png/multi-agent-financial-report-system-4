@@ -724,22 +724,76 @@ class AnalysisWorkflow:
 
         comparison_records: List[Dict[str, Any]] = []
         for label, key in metric_keys:
-            val_a = (first_extracted.get("financial_values") or {}).get(key) or first_extracted.get(key)
-            val_b = (extracted_b.get("financial_values") or {}).get(key) or extracted_b.get(key)
-            res = compare_company_metrics(
-                {"company_name": first_company_name, "metric": label, "value": val_a},
-                {"company_name": effective_b_name, "metric": label, "value": val_b},
-                metric_name=label,
-            )
+            # Safely extract values from financial_values without passing conflicted dicts
+            # This ensures Company A and Company B observations remain completely isolated
+            fv_a = (first_extracted.get("financial_values") or {}).get(key)
+            fv_b = (extracted_b.get("financial_values") or {}).get(key)
+
+            # Extract only the essential comparison fields, keeping company scope strict
+            if isinstance(fv_a, dict) and fv_a.get("display_value") is not None:
+                obs_a = {
+                    "company_name": first_company_name,
+                    "metric": label,
+                    "value": fv_a.get("display_value"),
+                    "raw_value": fv_a.get("raw_value"),
+                    "numeric_value": fv_a.get("value"),
+                    "currency": fv_a.get("currency"),
+                    "unit": fv_a.get("unit_scale"),
+                    "evidence": fv_a.get("evidence"),
+                    "source_file": fv_a.get("source_file"),
+                    "source_page": fv_a.get("source_page"),
+                    "source_chunk_id": fv_a.get("source_chunk"),
+                    "report_year": fv_a.get("year") or fv_a.get("period"),
+                    # DO NOT pass conflicts field - keep company scopes isolated
+                }
+            else:
+                obs_a = {
+                    "company_name": first_company_name,
+                    "metric": label,
+                    "value": fv_a or first_extracted.get(key),
+                }
+
+            if isinstance(fv_b, dict) and fv_b.get("display_value") is not None:
+                obs_b = {
+                    "company_name": effective_b_name,
+                    "metric": label,
+                    "value": fv_b.get("display_value"),
+                    "raw_value": fv_b.get("raw_value"),
+                    "numeric_value": fv_b.get("value"),
+                    "currency": fv_b.get("currency"),
+                    "unit": fv_b.get("unit_scale"),
+                    "evidence": fv_b.get("evidence"),
+                    "source_file": fv_b.get("source_file"),
+                    "source_page": fv_b.get("source_page"),
+                    "source_chunk_id": fv_b.get("source_chunk"),
+                    "report_year": fv_b.get("year") or fv_b.get("period"),
+                    # DO NOT pass conflicts field - keep company scopes isolated
+                }
+            else:
+                obs_b = {
+                    "company_name": effective_b_name,
+                    "metric": label,
+                    "value": fv_b or extracted_b.get(key),
+                }
+
+            res = compare_company_metrics(obs_a, obs_b, metric_name=label)
             comparison_records.append(res)
 
         comparison_status = "completed" if any(row.get("comparison_status") in {"higher", "lower", "equal"} for row in comparison_records) else "partial"
+        first_year = first_extracted.get("report_year")
+        second_year = extracted_b.get("report_year")
+        comparison_type = (
+            "year_over_year"
+            if first_year not in (None, "") and second_year not in (None, "") and str(first_year) != str(second_year)
+            else "single_year"
+        )
         return {
             "analysis_id": analysis_id,
             "comparison_id": comparison_id,
             "status": comparison_status,
             "companies": [first_company_name, effective_b_name],
             "comparison_document_id": second_document_id,
+            "comparison_type": comparison_type,
             "metrics": comparison_records,
             "records": comparison_records,
             "summary": {

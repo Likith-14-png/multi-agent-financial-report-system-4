@@ -256,6 +256,26 @@ def _comparison_period(record: Dict[str, Any]) -> Optional[int]:
     return _normalize_year_value(record.get("report_year") or record.get("year") or record.get("period"))
 
 
+def _comparison_period_kind(record: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(record, dict):
+        return None
+    period_value = record.get("period") or record.get("report_period") or record.get("report_year") or record.get("year")
+    if period_value in (None, ""):
+        return None
+    text = str(period_value).strip().lower()
+    if not text:
+        return None
+    if re.search(r"\bq[1-4]\b|\bquarter\b", text):
+        return "quarter"
+    if re.search(r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|month)\b", text):
+        return "month"
+    if re.search(r"(?:19|20)\d{2}|fy\d{2,4}|fiscal", text):
+        return "year"
+    if re.fullmatch(r"\d{4}", text):
+        return "year"
+    return None
+
+
 def _comparison_context(record: Dict[str, Any]) -> Optional[str]:
     value = record.get("statement_context") or record.get("context") or record.get("section_type") or record.get("section")
     if not value:
@@ -342,6 +362,13 @@ def resolve_comparison_context(
     }
 
 
+def _coalesce_first_non_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _structured_comparison_value(record: Dict[str, Any], metric_name: str) -> Dict[str, Any]:
     """Use structured extraction fields first and parse raw values only as fallback."""
     nested_value = record.get("value") if isinstance(record.get("value"), dict) else None
@@ -351,13 +378,13 @@ def _structured_comparison_value(record: Dict[str, Any], metric_name: str) -> Di
         raw_value = source_record.get("display_value")
     if raw_value is None:
         metric_key = _comparison_metric_key(metric_name)
-        raw_value = (
-            record.get("value")
-            or record.get("current_value")
-            or record.get("amount")
-            or record.get(metric_key)
-            or record.get(metric_key.replace(" ", "_"))
-            or record.get(metric_name)
+        raw_value = _coalesce_first_non_none(
+            record.get("value"),
+            record.get("current_value"),
+            record.get("amount"),
+            record.get(metric_key),
+            record.get(metric_key.replace(" ", "_")),
+            record.get(metric_name),
         )
     numeric_value = source_record.get("numeric_value")
     unit = source_record.get("unit") or source_record.get("unit_scale")
@@ -444,6 +471,50 @@ def _comparison_payload(
     }
 
 
+def _has_missing_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return False
+    if isinstance(value, dict):
+        if _has_missing_value(value.get("value")):
+            return True
+        status = value.get("status")
+        semantic_status = value.get("semantic_status")
+        for label in (status, semantic_status):
+            if isinstance(label, str):
+                normalized = label.strip().lower()
+                if normalized in {"not_found", "missing", "not available", "unavailable", "none", "null", "not disclosed"}:
+                    return True
+        return False
+    text = str(value).strip()
+    return not text or text.lower() in {
+        "na",
+        "n/a",
+        "not available",
+        "unavailable",
+        "none",
+        "null",
+        "not disclosed",
+    }
+
+
+def _has_missing_status(record: Dict[str, Any]) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if isinstance(record.get("value"), dict) and _has_missing_status(record["value"]):
+        return True
+    for key in ("status", "semantic_status", "value_status"):
+        status_value = record.get(key)
+        if isinstance(status_value, str):
+            normalized = status_value.strip().lower()
+            if normalized in {"not_found", "missing", "not available", "unavailable", "none", "null", "not disclosed"}:
+                return True
+    return False
+
+
 def _clean_source_chunk_value(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -461,21 +532,22 @@ def _clean_source_chunk_value(value: Any) -> Optional[str]:
 def _extract_source_chunks(entry: Any) -> List[str]:
     if isinstance(entry, dict):
         chunks: List[str] = []
-        source_chunks = entry.get("source_chunks")
-        if isinstance(source_chunks, list):
-            for chunk in source_chunks:
-                cleaned = _clean_source_chunk_value(chunk)
+        for key in ("source_chunks", "evidence", "evidence_text", "citation", "source"):
+            value = entry.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    cleaned = _clean_source_chunk_value(item)
+                    if cleaned and cleaned not in chunks:
+                        chunks.append(cleaned)
+            elif isinstance(value, tuple):
+                for item in value:
+                    cleaned = _clean_source_chunk_value(item)
+                    if cleaned and cleaned not in chunks:
+                        chunks.append(cleaned)
+            elif isinstance(value, str) and value.strip():
+                cleaned = _clean_source_chunk_value(value)
                 if cleaned and cleaned not in chunks:
                     chunks.append(cleaned)
-        elif isinstance(source_chunks, tuple):
-            for chunk in source_chunks:
-                cleaned = _clean_source_chunk_value(chunk)
-                if cleaned and cleaned not in chunks:
-                    chunks.append(cleaned)
-        elif isinstance(source_chunks, str) and source_chunks.strip():
-            cleaned = _clean_source_chunk_value(source_chunks)
-            if cleaned:
-                chunks.append(cleaned)
 
         chunk_id = entry.get("chunk_id")
         cleaned_chunk_id = _clean_source_chunk_value(chunk_id)
@@ -599,44 +671,56 @@ def _metric_series_for_name(metric_name: str, extracted_metrics: Dict[str, Any])
         if matches:
             registry["list"] = matches
 
+    observation_list = extracted_metrics.get("observations") or extracted_metrics.get("detailed_metrics") or []
+    if isinstance(observation_list, list):
+        matches = []
+        for item in observation_list:
+            if not isinstance(item, dict):
+                continue
+            item_metric = item.get("metric") or item.get("metric_name") or item.get("normalized_name") or item.get("name")
+            if _canonical_metric_name(item_metric) == canonical or _canonical_metric_name(item_metric) == metric_name:
+                year = item.get("report_year") or item.get("year") or item.get("period")
+                value = item.get("raw_value") if item.get("raw_value") is not None else item.get("value")
+                if year is not None and value is not None:
+                    matches.append({**item, "year": year, "value": value})
+        if matches:
+            registry["observations"] = matches
+
+    combined: List[Dict[str, Any]] = []
+    deduped: set[Tuple[Any, Any]] = set()
+    for source_key in ("yearly", "observations", "list"):
+        series = registry.get(source_key)
+        if not isinstance(series, list):
+            continue
+        for item in series:
+            if not isinstance(item, dict):
+                continue
+            year = item.get("year") or item.get("period") or item.get("report_year")
+            value = item.get("value") or item.get("amount") or item.get("raw_value")
+            if year is None or value is None:
+                continue
+            key = (_normalize_year_value(year), value)
+            if key in deduped:
+                continue
+            deduped.add(key)
+            combined.append({**item, "year": year, "value": value})
+
     direct_value = registry.get("direct") or registry.get("alt")
     direct_year = _normalize_year_value(extracted_metrics.get("report_year"))
-    if "yearly" in registry and direct_value is not None and direct_year is not None:
-        series = registry["yearly"]
-        if isinstance(series, list):
-            normalized = []
-            for item in series:
-                if isinstance(item, dict):
-                    year = item.get("year") or item.get("period") or item.get("report_year")
-                    value = item.get("value") or item.get("amount")
-                    if year is not None and value is not None:
-                        normalized.append({**item, "year": year, "value": value})
-            if not any(_normalize_year_value(item.get("year")) == direct_year for item in normalized):
-                normalized.insert(0, {
-                    "year": direct_year,
-                    "value": direct_value,
-                    "numeric_value": extracted_metrics.get("numeric_value"),
-                    "currency": extracted_metrics.get("currency"),
-                    "unit": extracted_metrics.get("unit") or extracted_metrics.get("unit_scale"),
-                    "unit_multiplier": extracted_metrics.get("unit_multiplier"),
-                    "source": extracted_metrics.get("source"),
-                    "chunk_id": extracted_metrics.get("chunk_id"),
-                    "source_chunks": extracted_metrics.get("source_chunks"),
-                })
-            return normalized
-
-    if "yearly" in registry:
-        series = registry["yearly"]
-        if isinstance(series, list):
-            normalized = []
-            for item in series:
-                if isinstance(item, dict):
-                    year = item.get("year") or item.get("period") or item.get("report_year")
-                    value = item.get("value") or item.get("amount")
-                    if year is not None and value is not None:
-                        normalized.append({**item, "year": year, "value": value})
-            return normalized
-        return []
+    if combined:
+        if direct_value is not None and direct_year is not None and not any(_normalize_year_value(item.get("year")) == direct_year for item in combined):
+            combined.insert(0, {
+                "year": direct_year,
+                "value": direct_value,
+                "numeric_value": extracted_metrics.get("numeric_value"),
+                "currency": extracted_metrics.get("currency"),
+                "unit": extracted_metrics.get("unit") or extracted_metrics.get("unit_scale"),
+                "unit_multiplier": extracted_metrics.get("unit_multiplier"),
+                "source": extracted_metrics.get("source"),
+                "chunk_id": extracted_metrics.get("chunk_id"),
+                "source_chunks": extracted_metrics.get("source_chunks"),
+            })
+        return sorted(combined, key=lambda item: _normalize_year_value(item.get("year")) or -1)
 
     if "list" in registry:
         items = registry["list"]
@@ -686,7 +770,7 @@ def _percentage_change(current_value: float, previous_value: float) -> Optional[
         if current_value == 0:
             return 0.0
         return None
-    value = ((current_value - previous_value) / abs(previous_value)) * 100.0
+    value = ((current_value - previous_value) / previous_value) * 100.0
     return round(value, 2)
 
 
@@ -706,6 +790,26 @@ def _serialize_record(metric_name: str, current_year: Any, current_value: Any, u
     current_numeric, previous_numeric, comparison_unit = _comparison_pair_values(metric_name, current_context, previous_context)
     chosen_unit = unit or comparison_unit or current_context.get("unit") or "unitless"
     chosen_currency = current_context.get("currency") or previous_context.get("currency")
+    observation_source = (
+        source
+        or current_observation.get("source")
+        or current_observation.get("source_file")
+        or current_observation.get("evidence")
+        or current_observation.get("evidence_text")
+        or "Extracted Financial Metrics"
+    )
+    observation_chunks = (
+        source_chunks
+        or current_observation.get("source_chunks")
+        or _extract_source_chunks(current_observation)
+        or []
+    )
+    evidence_text = (
+        current_observation.get("evidence")
+        or current_observation.get("evidence_text")
+        or current_observation.get("exact_evidence")
+        or current_observation.get("raw_value")
+    )
 
     record: Dict[str, Any] = {
         "metric": metric_name,
@@ -722,18 +826,20 @@ def _serialize_record(metric_name: str, current_year: Any, current_value: Any, u
         "CurrentYear": current_year,
         "current_value": current_numeric,
         "CurrentValue": current_numeric,
-        "source": source or current_observation.get("source") or "Extracted Financial Metrics",
-        "Source": source or "Extracted Financial Metrics",
-        "source_chunks": source_chunks or current_observation.get("source_chunks") or [],
-        "SourceChunks": source_chunks or current_observation.get("source_chunks") or [],
+        "source": observation_source,
+        "Source": observation_source,
+        "evidence": evidence_text,
+        "source_chunks": observation_chunks,
+        "SourceChunks": observation_chunks,
     }
 
+    record["previous_year"] = previous_year
+    record["PreviousYear"] = previous_year
+    record["previous_value"] = previous_numeric
+    record["PreviousValue"] = previous_numeric
+    record["previous_source_value"] = previous_source_numeric
+
     if previous_year is not None:
-        record["previous_year"] = previous_year
-        record["PreviousYear"] = previous_year
-        record["previous_value"] = previous_numeric
-        record["PreviousValue"] = previous_numeric
-        record["previous_source_value"] = previous_source_numeric
         if current_numeric is not None and previous_numeric is not None:
             absolute_change = _rounded_float(current_numeric - previous_numeric)
             record["absolute_change"] = absolute_change
@@ -762,11 +868,44 @@ def _serialize_record(metric_name: str, current_year: Any, current_value: Any, u
     return record
 
 
+def _coalesce_first_non_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any], metric_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Compare two companies' metrics with strict isolation of observations.
+
+    Company A and Company B observations are kept completely separate:
+    - Conflicts are company-specific and never mixed across companies
+    - Evidence is preserved per company
+    - Company identities are never reversed or contaminated
+    """
     metric_label = metric_name or company_a.get("metric") or company_b.get("metric") or "Revenue"
     m_key = metric_label.lower().replace(" ", "_")
-    a_raw = company_a.get("value") or company_a.get("current_value") or company_a.get("amount") or company_a.get(m_key) or company_a.get(metric_label)
-    b_raw = company_b.get("value") or company_b.get("current_value") or company_b.get("amount") or company_b.get(m_key) or company_b.get(metric_label)
+
+    # Company A observation extraction with strict scoping
+    a_raw = _coalesce_first_non_none(
+        company_a.get("value"),
+        company_a.get("current_value"),
+        company_a.get("amount"),
+        company_a.get(m_key),
+        company_a.get(metric_label),
+    )
+    a_raw = None if isinstance(a_raw, dict) and "value" in a_raw else a_raw  # Sanitize dict with conflicts
+
+    # Company B observation extraction with strict scoping
+    b_raw = _coalesce_first_non_none(
+        company_b.get("value"),
+        company_b.get("current_value"),
+        company_b.get("amount"),
+        company_b.get(m_key),
+        company_b.get(metric_label),
+    )
+    b_raw = None if isinstance(b_raw, dict) and "value" in b_raw else b_raw  # Sanitize dict with conflicts
     metric_a = _comparison_metric_key(company_a.get("metric") or metric_label)
     metric_b = _comparison_metric_key(company_b.get("metric") or metric_label)
     requested_metric = _comparison_metric_key(metric_label)
@@ -786,8 +925,16 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
 
     period_a = _comparison_period(company_a)
     period_b = _comparison_period(company_b)
-    if period_a is not None and period_b is not None and period_a != period_b:
-        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the reporting periods differ")
+    period_kind_a = _comparison_period_kind(company_a)
+    period_kind_b = _comparison_period_kind(company_b)
+    if (
+        period_a is not None
+        and period_b is not None
+        and period_kind_a is not None
+        and period_kind_b is not None
+        and period_kind_a != period_kind_b
+    ):
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the reporting periods differ in granularity")
 
     context_a = _comparison_context(company_a)
     context_b = _comparison_context(company_b)
@@ -798,8 +945,11 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     if definition_a and definition_b and definition_a != definition_b:
         return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the metric definitions differ")
 
-    if a_value is None or b_value is None:
-        reason = "a value is missing" if a_raw in (None, "") or b_raw in (None, "") else "a value is not numeric"
+    if _has_missing_status(company_a) or _has_missing_status(company_b):
+        return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "a value is missing")
+
+    if _has_missing_value(a_raw) or _has_missing_value(b_raw) or a_value is None or b_value is None:
+        reason = "a value is missing" if _has_missing_value(a_raw) or _has_missing_value(b_raw) else "a value is not numeric"
         return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, reason)
 
     metric_type = a_context.get("metric_type")
@@ -812,14 +962,38 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     if normalized_a is None or normalized_b is None:
         return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the units cannot be normalized")
 
-    difference = _rounded_float(normalized_b - normalized_a)
+    if period_a is not None and period_b is not None and period_a != period_b:
+        if period_a > period_b:
+            previous_value = normalized_b
+            current_value = normalized_a
+            previous_company = company_b
+            current_company = company_a
+        else:
+            previous_value = normalized_a
+            current_value = normalized_b
+            previous_company = company_a
+            current_company = company_b
+    else:
+        previous_value = normalized_a
+        current_value = normalized_b
+        previous_company = company_a
+        current_company = company_b
+
+    difference = _rounded_float(current_value - previous_value)
     direction = "increase" if difference > 0 else "decrease" if difference < 0 else "unchanged"
-    status = "equal" if math.isclose(normalized_a, normalized_b, rel_tol=0.0, abs_tol=1e-10) else "comparable"
+    status = "equal" if math.isclose(previous_value, current_value, rel_tol=0.0, abs_tol=1e-10) else "comparable"
+    if previous_value == 0 and current_value == 0:
+        percentage_difference = 0.0
+    elif previous_value == 0:
+        percentage_difference = None
+    else:
+        percentage_difference = _percentage_change(current_value, previous_value)
     direction_rules = {
         "revenue": "higher_better",
         "operating income": "higher_better",
         "operating margin": "higher_better",
         "net income": "higher_better",
+        "total liabilities": "lower_better",
         "debt": "lower_better",
         "debt to equity": "lower_better",
         "cash flow": "higher_better",
@@ -830,25 +1004,68 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     better_company = None
     if status != "equal" and metric_direction != "neutral":
         if metric_direction == "higher_better":
-            better_company = company_b.get("company_name") if normalized_b > normalized_a else company_a.get("company_name")
+            if current_value > previous_value:
+                better_company = current_company.get("company_name") or "Company B"
+            elif current_value < previous_value:
+                better_company = previous_company.get("company_name") or "Company A"
         else:
-            better_company = company_b.get("company_name") if normalized_b < normalized_a else company_a.get("company_name")
+            if current_value < previous_value:
+                better_company = current_company.get("company_name") or "Company B"
+            elif current_value > previous_value:
+                better_company = previous_company.get("company_name") or "Company A"
     if status == "equal":
         interpretation = "The companies have equal normalized values."
     elif better_company:
-        interpretation = f"{better_company} has {'higher' if metric_direction == 'higher_better' else 'lower'} {metric_label.lower()} than {company_a.get('company_name') if better_company == company_b.get('company_name') else company_b.get('company_name')}."
+        other_company = previous_company.get("company_name") or "Company A" if better_company == (current_company.get("company_name") or "Company B") else current_company.get("company_name") or "Company B"
+        interpretation = f"{better_company} has {'higher' if metric_direction == 'higher_better' else 'lower'} {metric_label.lower()} than {other_company}."
     else:
         interpretation = f"The companies have different {metric_label.lower()} values; the metric direction is neutral."
+
+    # Build company sections with strict identity preservation and evidence retention
+    company_a_section = {
+        "company_name": company_a.get("company_name") or "Company A",
+        "value": normalized_a,
+        "currency": currency_a,
+        "unit": a_unit,
+        "comparison_value": _rounded_float(normalized_a),
+    }
+    # Preserve evidence and provenance from Company A's observation
+    if company_a.get("evidence"):
+        company_a_section["evidence"] = company_a.get("evidence")
+    if company_a.get("source_file"):
+        company_a_section["source_file"] = company_a.get("source_file")
+    if company_a.get("source_page") is not None:
+        company_a_section["source_page"] = company_a.get("source_page")
+    if company_a.get("source_chunk_id"):
+        company_a_section["source_chunk_id"] = company_a.get("source_chunk_id")
+
+    company_b_section = {
+        "company_name": company_b.get("company_name") or "Company B",
+        "value": normalized_b,
+        "currency": currency_b,
+        "unit": b_unit,
+        "comparison_value": _rounded_float(normalized_b),
+    }
+    # Preserve evidence and provenance from Company B's observation
+    if company_b.get("evidence"):
+        company_b_section["evidence"] = company_b.get("evidence")
+    if company_b.get("source_file"):
+        company_b_section["source_file"] = company_b.get("source_file")
+    if company_b.get("source_page") is not None:
+        company_b_section["source_page"] = company_b.get("source_page")
+    if company_b.get("source_chunk_id"):
+        company_b_section["source_chunk_id"] = company_b.get("source_chunk_id")
+
     return {
         "metric": metric_label,
-        "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": a_value, "currency": currency_a, "unit": a_unit, "comparison_value": _rounded_float(normalized_a)},
-        "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": b_value, "currency": currency_b, "unit": b_unit, "comparison_value": _rounded_float(normalized_b)},
+        "company_a": company_a_section,
+        "company_b": company_b_section,
         "difference": difference,
         "direction": direction,
         "unit": target_unit,
         "comparison_status": status,
         "absolute_difference": _rounded_float(abs(difference)),
-        "percentage_difference": _percentage_change(normalized_b, normalized_a),
+        "percentage_difference": percentage_difference,
         "difference_basis": "company_b_minus_company_a",
         "metric_direction": metric_direction,
         "better_company": better_company,
@@ -957,9 +1174,11 @@ def compare_extracted_metrics(extracted_metrics: Dict[str, Any]) -> ComparisonRe
             metric_evidence_sources = _filter_valid_source_chunks(metric_evidence_sources)
 
         if current_year is not None and previous_year is None and canonical_year is not None:
-            previous_year = canonical_year - 1 if isinstance(canonical_year, int) else None
-            if previous_year is not None:
-                previous_value = None
+            # Only set a prior period when an actual historical observation exists.
+            # A current-only extraction payload should remain single-year/unavailable,
+            # not infer a prior year that has no matching value.
+            previous_year = None
+            previous_value = None
         elif current_year is not None and previous_year is None and sorted_series:
             prev_candidate = max(
                 (item for item in sorted_series if _normalize_year_value(item.get("year")) is not None and _normalize_year_value(item.get("year")) < current_year),

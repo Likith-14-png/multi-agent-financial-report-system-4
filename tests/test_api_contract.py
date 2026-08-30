@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
+import json
 from fastapi.testclient import TestClient
 
-from backend.api import app
+from backend.api import app, _public_extraction_payload
 from backend.orchestration.workflow import AnalysisWorkflow
 
 client = TestClient(app)
@@ -57,12 +58,14 @@ def test_upload_analysis_returns_canonical_success_response():
     assert ext_body.get("operating_income") == "$2.1 billion"
     assert ext_body.get("total_assets") == "$22.6 billion"
     assert ext_body.get("total_liabilities") == "$9.8 billion"
-    assert "yearly_metrics" not in ext_body
     assert "financial_values" not in ext_body
-    assert "observations" not in ext_body
-    assert "detailed_metrics" not in ext_body
     assert "source_text" not in ext_body
     assert "numeric_value" not in json.dumps(ext_body)
+    assert "unit_multiplier" not in json.dumps(ext_body)
+    if ext_body.get("yearly_metrics"):
+        assert ext_body["yearly_metrics"]["Revenue"][0]["year"] in {2025, 2024}
+    if ext_body.get("observations"):
+        assert ext_body["observations"][0].get("metric") or ext_body["observations"][0].get("metric_name")
     revenue_metric = next(item for item in ext_body["metrics"] if item["metric"] == "Revenue")
     assert revenue_metric["value"] == "$15.3 billion"
     assert "provenance" in revenue_metric
@@ -86,6 +89,71 @@ def test_upload_analysis_returns_canonical_success_response():
     rep_body = rep_resp.json()
     assert rep_body.get("report_status") in {"complete", "partial"}
     assert rep_body.get("financial_metrics") or rep_body.get("extraction")
+
+
+def test_comparison_endpoint_serializes_non_null_comparison_type():
+    payload = _abb_upload_payload()
+    response = client.post(
+        "/analysis/upload",
+        files={"file": payload["file"]},
+        data=payload["data"],
+    )
+
+    assert response.status_code == 200, response.text
+    analysis_id = response.json()["analysis_id"]
+
+    comparison_path = Path(__file__).resolve().parent.parent / "vantage_retail.txt"
+    comparison_response = client.post(
+        f"/analysis/{analysis_id}/comparison/upload",
+        files={"file": (comparison_path.name, comparison_path.read_bytes(), "text/plain")},
+        data={"company_name": "Vantage Retail", "report_year": "2025"},
+    )
+
+    assert comparison_response.status_code == 200, comparison_response.text
+    body = comparison_response.json()
+    assert body["comparison_type"] in {"single_year", "year_over_year"}
+    assert body["comparison_type"] is not None
+    assert body["status"] in {"completed", "partial"}
+    assert len(body["companies"]) == 2
+    assert body["metrics"]
+    assert body["records"]
+
+    persisted = client.get(f"/analysis/{analysis_id}/comparison")
+    assert persisted.status_code == 200, persisted.text
+    persisted_body = persisted.json()
+    assert persisted_body["comparison_type"] == body["comparison_type"]
+    assert persisted_body["comparison_type"] is not None
+    assert persisted_body["summary"]["companies_compared"] == body["summary"]["companies_compared"]
+
+
+def test_public_extraction_payload_preserves_historical_series_and_observations():
+    extracted = {
+        "analysis_id": "analysis-123",
+        "document_id": "doc-123",
+        "company_name": "Test Co",
+        "report_year": 2026,
+        "yearly_metrics": {
+            "Revenue": [
+                {"year": 2025, "value": "$100 million", "currency": "USD", "unit": "million", "source_file": "report.pdf", "page_number": 12, "section": "Income Statement"},
+                {"year": 2026, "value": "$120 million", "currency": "USD", "unit": "million", "source_file": "report.pdf", "page_number": 12, "section": "Income Statement"},
+            ]
+        },
+        "observations": [
+            {"metric": "Revenue", "metric_name": "revenue", "canonical_label": "Revenue", "report_year": 2025, "value": "$100 million", "currency": "USD", "unit": "million", "source_file": "report.pdf", "source_page": 12, "source_section": "Income Statement", "provenance": {"source_file": "report.pdf", "page": 12, "chunk_id": "chunk-25", "section": "Income Statement"}},
+            {"metric": "Revenue", "metric_name": "revenue", "canonical_label": "Revenue", "report_year": 2026, "value": "$120 million", "currency": "USD", "unit": "million", "source_file": "report.pdf", "source_page": 12, "source_section": "Income Statement", "provenance": {"source_file": "report.pdf", "page": 12, "chunk_id": "chunk-26", "section": "Income Statement"}},
+        ],
+    }
+
+    public_payload = _public_extraction_payload(extracted, "analysis-123", "Test Co", 2026)
+
+    assert public_payload["yearly_metrics"]["Revenue"][0]["year"] == 2025
+    assert public_payload["yearly_metrics"]["Revenue"][1]["year"] == 2026
+    assert public_payload["observations"][0]["report_year"] == 2025
+    assert public_payload["observations"][1]["report_year"] == 2026
+    assert public_payload["observations"][0]["provenance"]["chunk_id"] == "chunk-25"
+    assert public_payload["observations"][1]["provenance"]["chunk_id"] == "chunk-26"
+    assert "numeric_value" not in json.dumps(public_payload)
+    assert "unit_multiplier" not in json.dumps(public_payload)
 
 
 def test_extraction_uses_current_document_only_for_company_scope():
