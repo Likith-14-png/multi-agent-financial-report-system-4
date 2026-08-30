@@ -308,3 +308,337 @@ def test_research_agent_uses_shared_question_and_retrieval_components(monkeypatc
 
     assert calls.get("analyze") == "Why did ABB revenue increase?"
     assert calls.get("retrieval") == "Why did ABB revenue increase?"
+
+
+def test_research_agent_keeps_supported_metric_value_and_rejects_unsupported_metric_candidate():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-supported",
+            "document": "Revenue increased to $500 million.",
+            "metadata": {
+                "company_name": "Aster Corp",
+                "analysis_id": "session-support-1",
+                "section_title": "Income Statement",
+                "source_file": "aster_2025.txt",
+                "chunk_id": "chunk-supported",
+            },
+        }
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $187 million. Revenue increased to $500 million."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Aster Corp", analysis_id="session-support-1")
+
+    assert "$187 million" not in answer.final_answer.lower()
+    assert "$500 million" in answer.final_answer.lower()
+
+
+def test_research_agent_rejects_unsupported_currency_metric_even_when_supported_euro_value_exists():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-euro",
+            "document": "Revenue was €500 million.",
+            "metadata": {
+                "company_name": "Aster Corp",
+                "analysis_id": "session-euro-1",
+                "section_title": "Income Statement",
+                "source_file": "aster_2025.txt",
+                "chunk_id": "chunk-euro",
+            },
+        }
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $187 million. Revenue was €500 million."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Aster Corp", analysis_id="session-euro-1")
+
+    assert "$187 million" not in answer.final_answer.lower()
+    assert "€500 million" in answer.final_answer.lower()
+
+
+def test_research_agent_uses_only_numbers_supported_by_selected_evidence():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-relevant",
+            "document": "Revenue increased to $500 million.",
+            "metadata": {
+                "company_name": "Aster Corp",
+                "analysis_id": "session-supported-multi",
+                "section_title": "Income Statement",
+                "source_file": "aster_2025.txt",
+                "chunk_id": "chunk-relevant",
+            },
+        },
+        {
+            "id": "chunk-unrelated",
+            "document": "Operating cash flow was $1 million.",
+            "metadata": {
+                "company_name": "Aster Corp",
+                "analysis_id": "session-supported-multi",
+                "section_title": "Cash Flow Statement",
+                "source_file": "aster_2025.txt",
+                "chunk_id": "chunk-unrelated",
+            },
+        },
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $500 million. Operating cash flow was $1 million."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Aster Corp", analysis_id="session-supported-multi")
+
+    assert "$500 million" in answer.final_answer.lower()
+    assert "$1 million" not in answer.final_answer.lower()
+
+
+def test_research_agent_can_return_narrative_without_inventing_metric_when_no_metric_evidence_is_present():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-narrative",
+            "document": "The company improved revenue resilience and expanded its market reach.",
+            "metadata": {
+                "company_name": "Nova Systems",
+                "analysis_id": "session-narrative",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "nova_2025.txt",
+                "chunk_id": "chunk-narrative",
+            },
+        }
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $187 million. The company improved revenue resilience and expanded its market reach."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Nova Systems", analysis_id="session-narrative")
+
+    assert "$187 million" not in answer.final_answer.lower()
+    assert "revenue resilience" in answer.final_answer.lower()
+
+
+def test_research_agent_rejects_unsupported_metrics_for_arbitrary_company_values():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-arbitrary",
+            "document": "Revenue was £75.2 million.",
+            "metadata": {
+                "company_name": "Northwind Ltd.",
+                "analysis_id": "session-arbitrary",
+                "section_title": "Income Statement",
+                "source_file": "northwind_2025.txt",
+                "chunk_id": "chunk-arbitrary",
+            },
+        }
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $12.4 million. Revenue was £75.2 million."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Northwind Ltd.", analysis_id="session-arbitrary")
+
+    assert "$12.4 million" not in answer.final_answer.lower()
+    assert "£75.2 million" in answer.final_answer.lower()
+
+
+def test_research_agent_preserves_provenance_when_supported_metric_is_retained():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "chunk-provenance",
+            "document": "Revenue increased to $500 million.",
+            "metadata": {
+                "company_name": "Aster Corp",
+                "analysis_id": "session-provenance",
+                "section_title": "Income Statement",
+                "source_file": "aster_2025.txt",
+                "page_number": 8,
+                "report_year": 2025,
+                "chunk_id": "chunk-provenance",
+            },
+        }
+    ])
+
+    def mock_llm(prompt: str) -> str:
+        return "Revenue was $500 million."
+
+    answer = ResearchAgent(collection, llm_generate=mock_llm).answer("What was revenue?", company="Aster Corp", analysis_id="session-provenance")
+
+    assert "$500 million" in answer.final_answer.lower()
+    assert answer.steps[0].citations[0].source_file == "aster_2025.txt"
+    assert answer.steps[0].citations[0].page == 8
+    assert answer.steps[0].citations[0].chunk_id == "chunk-provenance"
+
+
+def test_research_agent_prefers_relevant_financial_development_over_generic_accounting_note():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "generic-accounting",
+            "document": "Accounting policy note and risk indicators describe how revenue is recognized under the company accounting framework.",
+            "metadata": {
+                "company_name": "Apex Group",
+                "analysis_id": "session-rank-dev",
+                "section_title": "Accounting Notes and Risk Indicators",
+                "source_file": "apex_2025.txt",
+                "chunk_id": "generic-accounting",
+            },
+        },
+        {
+            "id": "financial-development",
+            "document": "Revenue increased 14% to $15.3 billion driven by strong demand, and operating income improved to $2.1 billion.",
+            "metadata": {
+                "company_name": "Apex Group",
+                "analysis_id": "session-rank-dev",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "apex_2025.txt",
+                "chunk_id": "financial-development",
+            },
+        },
+    ])
+
+    answer = ResearchAgent(collection).answer(
+        "What are the major financial developments and risks in this report?",
+        company="Apex Group",
+        analysis_id="session-rank-dev",
+    )
+
+    top_snippet = answer.steps[0].citations[0].snippet
+    assert "Revenue increased" in top_snippet
+    assert "Accounting policy note" not in top_snippet
+
+
+def test_research_agent_prefers_risk_evidence_over_unrelated_accounting_note():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "generic-accounting-risk",
+            "document": "Accounting policy note explains the company accounting framework and general disclosure controls.",
+            "metadata": {
+                "company_name": "Bluebird Ltd.",
+                "analysis_id": "session-rank-risk",
+                "section_title": "Accounting Notes and Risk Indicators",
+                "source_file": "bluebird_2025.txt",
+                "chunk_id": "generic-accounting-risk",
+            },
+        },
+        {
+            "id": "real-risk",
+            "document": "Inflation and supply chain pressures increased margin risk and reduced operating leverage across the group.",
+            "metadata": {
+                "company_name": "Bluebird Ltd.",
+                "analysis_id": "session-rank-risk",
+                "section_title": "Risk Factors",
+                "source_file": "bluebird_2025.txt",
+                "chunk_id": "real-risk",
+            },
+        },
+    ])
+
+    answer = ResearchAgent(collection).answer(
+        "What are the major risks?",
+        company="Bluebird Ltd.",
+        analysis_id="session-rank-risk",
+    )
+
+    top_snippet = answer.steps[0].citations[0].snippet
+    assert "Inflation and supply chain" in top_snippet
+    assert "Accounting policy note" not in top_snippet
+
+
+def test_research_agent_prefers_question_year_when_ranked_against_older_evidence():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "older-year",
+            "document": "Revenue was $30 million in 2024 and the company improved operating performance.",
+            "metadata": {
+                "company_name": "Harbor Co",
+                "analysis_id": "session-rank-year",
+                "section_title": "Results of Operations",
+                "source_file": "harbor_2024.txt",
+                "page_number": 7,
+                "report_year": 2024,
+                "chunk_id": "older-year",
+            },
+        },
+        {
+            "id": "current-year",
+            "document": "Revenue was $42 million in 2025 and operating income improved materially.",
+            "metadata": {
+                "company_name": "Harbor Co",
+                "analysis_id": "session-rank-year",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "harbor_2025.txt",
+                "page_number": 9,
+                "report_year": 2025,
+                "chunk_id": "current-year",
+            },
+        },
+    ])
+
+    answer = ResearchAgent(collection).answer(
+        "What happened to revenue in 2025?",
+        company="Harbor Co",
+        analysis_id="session-rank-year",
+    )
+
+    assert "2025" in answer.steps[0].citations[0].snippet
+    assert "2024" not in answer.steps[0].citations[0].snippet
+
+
+def test_research_agent_does_not_invent_section_labels_when_metadata_is_missing():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "no-section",
+            "document": "Revenue increased 14% to $15.3 billion and operating income improved materially.",
+            "metadata": {
+                "company_name": "Northstar Inc.",
+                "analysis_id": "session-no-section",
+                "source_file": "northstar_2025.txt",
+                "chunk_id": "no-section",
+            },
+        }
+    ])
+
+    answer = ResearchAgent(collection).answer(
+        "What happened to revenue?",
+        company="Northstar Inc.",
+        analysis_id="session-no-section",
+    )
+
+    section_names = {citation.section for citation in answer.all_citations()}
+    assert "Unspecified section" in section_names
+    assert "Financial Overview" not in section_names
+
+
+def test_research_agent_keeps_metric_guard_for_unrelated_numbers_during_ranking():
+    collection = MockChromaIsolationCollection([
+        {
+            "id": "generic-irrelevant-number",
+            "document": "Accounting note references a non-operating value of $187 million in a historical footnote.",
+            "metadata": {
+                "company_name": "Pioneer Works",
+                "analysis_id": "session-protect-metric",
+                "section_title": "Accounting Notes",
+                "source_file": "pioneer_2025.txt",
+                "chunk_id": "generic-irrelevant-number",
+            },
+        },
+        {
+            "id": "relevant-revenue",
+            "document": "Revenue increased to $500 million and the company posted stronger performance in the period.",
+            "metadata": {
+                "company_name": "Pioneer Works",
+                "analysis_id": "session-protect-metric",
+                "section_title": "Management Discussion and Analysis",
+                "source_file": "pioneer_2025.txt",
+                "chunk_id": "relevant-revenue",
+            },
+        },
+    ])
+
+    answer = ResearchAgent(collection).answer(
+        "What was revenue?",
+        company="Pioneer Works",
+        analysis_id="session-protect-metric",
+    )
+
+    assert "$500 million" in answer.final_answer.lower()
+    assert "$187 million" not in answer.final_answer.lower()

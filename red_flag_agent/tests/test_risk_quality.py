@@ -124,6 +124,57 @@ def test_duplicate_evidence_is_consolidated_by_risk_and_context():
     assert "$42 billion" in debt_flags[0]["evidence"]
 
 
+def test_stable_liquidity_does_not_create_liquidity_risk():
+    result = OfflineAnalyzer().analyze(
+        "What are the risks?",
+        _chunk("The company maintained adequate liquidity and liquidity remains stable.", {"page": 8, "source_file": "report.pdf", "chunk_id": "liquidity-stable-8"}),
+    )
+
+    assert all(flag["title"] != "Liquidity risk" for flag in result["flags"])
+
+
+def test_genuine_liquidity_deterioration_still_generates_risk():
+    result = OfflineAnalyzer().analyze(
+        "What are the risks?",
+        _chunk("Operating cash flow fell to $1.2 billion from $2.4 billion and working capital tightened materially.", {"page": 11, "source_file": "report.pdf", "chunk_id": "cashflow-11"}),
+    )
+
+    assert any(flag["title"] == "Cash-flow decline" for flag in result["flags"])
+    assert any(flag["title"] == "Liquidity risk" for flag in result["flags"])
+
+
+def test_generic_currency_disclosure_does_not_create_quantitative_risk():
+    result = OfflineAnalyzer().analyze(
+        "What are the risks?",
+        _chunk("Currency volatility could affect reported earnings.", {"page": 9, "source_file": "report.pdf", "chunk_id": "fx-9"}),
+    )
+
+    assert all(flag["category"] != "Market" for flag in result["flags"])
+
+
+def test_metric_backed_debt_risk_uses_supporting_values_and_provenance():
+    result = OfflineAnalyzer().analyze(
+        "What are the risks?",
+        _chunk("Total debt increased to $60 million from $35 million, and leverage rose materially.", {"page": 13, "source_file": "report.pdf", "chunk_id": "debt-13"}),
+    )
+
+    debt_flags = [flag for flag in result["flags"] if flag["title"] == "Debt increase"]
+    assert debt_flags
+    assert "$60 million" in debt_flags[0]["evidence"]
+    assert debt_flags[0]["page"] == 13
+    assert debt_flags[0]["source_file"] == "report.pdf"
+    assert debt_flags[0]["source_chunk"] == "debt-13"
+
+
+def test_contradictory_liquidity_language_is_rejected_even_when_risk_keyword_appears():
+    result = OfflineAnalyzer().analyze(
+        "What are the risks?",
+        _chunk("The company maintained adequate liquidity and liquidity remains stable, although macroeconomic volatility could pressure order intake.", {"page": 17, "source_file": "report.pdf", "chunk_id": "liquidity-contradiction-17"}),
+    )
+
+    assert all(flag["title"] != "Liquidity risk" for flag in result["flags"])
+
+
 def test_independent_risks_remain_separate():
     result = OfflineAnalyzer().analyze(
         "What are the risks?",

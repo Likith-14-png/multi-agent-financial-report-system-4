@@ -1094,7 +1094,7 @@ class ResearchAgent:
 
     @staticmethod
     def _sanitize_section_title(raw_section: Any, doc_text: str) -> str:
-        """Sanitize junk numeric headers like '(95)', '4,116', '0.02' into meaningful section names."""
+        """Keep section names truthful: prefer authenticated source metadata and avoid inventing official report sections."""
         if raw_section is None:
             raw_str = ""
         else:
@@ -1111,7 +1111,7 @@ class ResearchAgent:
             inferred = ResearchAgent._infer_section_from_text(doc_text)
             if inferred:
                 return inferred
-            low = doc_text.lower()
+            low = (doc_text or "").lower()
             if "segment" in low or "division" in low or "breakdown" in low or "line of business" in low:
                 return "Revenue & Segment Analysis"
             if "cash flow" in low or "operating activities" in low:
@@ -1124,7 +1124,15 @@ class ResearchAgent:
                 return "Management Discussion and Analysis"
             if "risk factors" in low or "principal risks" in low:
                 return "Risk Factors"
-            return "Financial Overview"
+            return "Unspecified section"
+
+        # Preserve original metadata when it is not junk, but guard against obviously generic, fabricated-looking labels.
+        low_raw = raw_str.lower()
+        if any(prefix in low_raw for prefix in ["accounting notes", "risk indicators", "note:", "policy note", "generic context"]):
+            inferred = ResearchAgent._infer_section_from_text(doc_text)
+            if inferred:
+                return inferred
+            return "Unspecified section"
 
         return raw_str
 
@@ -1331,6 +1339,7 @@ class ResearchAgent:
                 final_answer = self._generalized_financial_synthesis(effective_q, intent, steps)
                 model_used = "deterministic-fallback"
 
+        final_answer = self._sanitize_unverified_metrics(final_answer, effective_q, steps)
         final_answer = self._format_five_section_answer(final_answer, effective_q, steps)
         logger.info("Research Agent synthesized answer using '%s' path for question: '%s'", model_used, effective_q)
 
@@ -1377,6 +1386,170 @@ class ResearchAgent:
         )
 
     @staticmethod
+    def _normalize_metric_value(value: str) -> str:
+        normalized = str(value or "").strip()
+        normalized = normalized.replace("−", "-").replace("–", "-").replace("—", "-")
+        normalized = normalized.replace(" ", "").replace(",", "").lower()
+        normalized = normalized.replace("$", "$").replace("€", "€").replace("£", "£").replace("¥", "¥").replace("₹", "₹")
+        return normalized
+
+    @classmethod
+    def _extract_money_tokens(cls, text: str) -> List[str]:
+        if not text:
+            return []
+        matches = re.findall(r"(?:[$€£¥₹])\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:million|billion|bn|m|thousand|k|%))?", text, flags=re.I)
+        return [m.strip() for m in matches if m.strip()]
+
+    @staticmethod
+    def _canonical_metric_label(label: str) -> str:
+        value = str(label or "").strip().lower()
+        if not value:
+            return ""
+        value = re.sub(r"[^a-z\s]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        aliases = {
+            "revenue": "revenue",
+            "sales": "revenue",
+            "turnover": "revenue",
+            "operating income": "operating income",
+            "net income": "net income",
+            "gross profit": "gross profit",
+            "operating margin": "operating margin",
+            "margin": "margin",
+            "earnings per share": "eps",
+            "diluted earnings per share": "eps",
+            "eps": "eps",
+            "diluted eps": "eps",
+            "cash flow": "cash flow",
+            "operating cash flow": "cash flow",
+            "free cash flow": "cash flow",
+            "debt": "debt",
+            "liabilities": "liabilities",
+            "equity": "equity",
+            "profit": "profit",
+            "income": "income",
+            "expense": "expense",
+            "cost": "cost",
+            "earnings": "earnings",
+        }
+        for key, canonical in aliases.items():
+            if value == key:
+                return canonical
+            if value.endswith(f" {key}"):
+                return canonical
+            if value.startswith(f"{key} "):
+                return canonical
+        return value
+
+    @classmethod
+    def _extract_metric_labels(cls, text: str) -> List[str]:
+        if not text:
+            return []
+        labels = re.findall(
+            r"\b(?:revenue|sales|turnover|operating income|operating margin|gross profit|net income|diluted eps|eps|earnings per share|diluted earnings per share|earnings|operating cash flow|cash flow|free cash flow|debt|liabilities|equity|profit|margin|income|expense|cost)\b",
+            text.lower(),
+        )
+        normalized = [cls._canonical_metric_label(label) for label in labels]
+        return list(dict.fromkeys(label for label in normalized if label))
+
+    @classmethod
+    def _sentence_metric_label(cls, sentence: str) -> str:
+        sentence = sentence.strip()
+        if not sentence:
+            return ""
+        lowered = sentence.lower()
+        labels = cls._extract_metric_labels(sentence)
+        for label in labels:
+            if label == "eps" and re.search(r"\b(?:diluted\s+)?(?:eps|earnings\s+per\s+share)\b", lowered):
+                return label
+            if label == "cash flow" and re.search(r"\b(?:free\s+|operating\s+)?cash\s+flow\b", lowered):
+                return label
+            if re.search(rf"\b{re.escape(label)}\b", lowered):
+                return label
+        return ""
+
+    @classmethod
+    def _snippet_relevant_to_question(cls, snippet: str, question: str) -> bool:
+        if not snippet or not question:
+            return True
+        snippet_labels = set(cls._extract_metric_labels(snippet))
+        question_labels = set(cls._extract_metric_labels(question))
+        if not question_labels:
+            return True
+        if snippet_labels and snippet_labels.intersection(question_labels):
+            return True
+        if snippet_labels and not snippet_labels.intersection(question_labels):
+            return False
+        return True
+
+    @classmethod
+    def _sanitize_unverified_metrics(cls, answer: Optional[str], question: str, steps: List[ResearchStep]) -> str:
+        if not answer or not isinstance(answer, str):
+            return answer or ""
+        if not steps:
+            return answer
+
+        supported_values = set()
+        supported_labels = set()
+        for step in steps:
+            for citation in step.citations:
+                snippet = citation.snippet or ""
+                for token in cls._extract_money_tokens(snippet):
+                    supported_values.add(cls._normalize_metric_value(token))
+                for label in cls._extract_metric_labels(snippet):
+                    supported_labels.add(label)
+
+        question_labels = set(cls._extract_metric_labels(question))
+        sentences = re.split(r"(?<=[.!?])\s+", answer)
+        kept_sentences: List[str] = []
+
+        for sentence in sentences:
+            if not sentence.strip():
+                continue
+
+            token_matches = cls._extract_money_tokens(sentence)
+            if not token_matches:
+                kept_sentences.append(sentence)
+                continue
+
+            label = cls._sentence_metric_label(sentence)
+            if question_labels and label and label not in question_labels:
+                continue
+
+            sentence_has_unsupported_value = False
+            cleaned_sentence = sentence
+            for token in token_matches:
+                normalized = cls._normalize_metric_value(token)
+                if normalized in supported_values:
+                    continue
+                if question_labels and label and label in question_labels:
+                    cleaned_sentence = cleaned_sentence.replace(token, "")
+                    sentence_has_unsupported_value = True
+                    continue
+                if question_labels and label and label not in question_labels:
+                    sentence_has_unsupported_value = True
+                    break
+                cleaned_sentence = cleaned_sentence.replace(token, "")
+                sentence_has_unsupported_value = True
+
+            if sentence_has_unsupported_value:
+                cleaned_sentence = re.sub(r"\s{2,}", " ", cleaned_sentence).strip()
+                cleaned_sentence = re.sub(r"\s*[,;]\s*$", "", cleaned_sentence)
+                cleaned_sentence = cleaned_sentence.strip(" -:;,. ")
+                if cleaned_sentence and (not question_labels or not re.search(r"(?:[$€£¥₹])\s*\d", cleaned_sentence, re.I)):
+                    kept_sentences.append(cleaned_sentence)
+                continue
+
+            kept_sentences.append(cleaned_sentence.strip())
+
+        cleaned = " ".join(part for part in kept_sentences if part and part.strip())
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return "Insufficient grounded evidence was retrieved to answer this question reliably. No indexed document evidence was found to answer the question."
+        return cleaned
+
+    @staticmethod
     def _format_five_section_answer(answer: Any, question: str, steps: List[ResearchStep]) -> str:
         """Apply one grounded, stable answer shape to every synthesis backend."""
         raw_answer = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=True)
@@ -1386,15 +1559,20 @@ class ResearchAgent:
             "The document does not provide sufficient information to determine this."
             if insufficient else raw_answer or "The document does not provide sufficient information to determine this."
         )
-        evidence = [citation.snippet.strip() for step in steps for citation in step.citations if citation.snippet.strip()]
+        question_labels = set(ResearchAgent._extract_metric_labels(question)) if isinstance(question, str) else set()
+        relevant_citations = [
+            citation for step in steps for citation in step.citations
+            if citation.snippet.strip() and (not question_labels or ResearchAgent._snippet_relevant_to_question(citation.snippet, question))
+        ]
+        evidence = [citation.snippet.strip() for citation in relevant_citations if citation.snippet.strip()]
         metrics = [
             f"{fact.metric}: {fact.raw_str}"
             for step in steps for fact in step.extracted_facts
-            if fact.raw_str
+            if fact.raw_str and ((not question_labels) or set(ResearchAgent._extract_metric_labels(fact.metric)) & question_labels or set(ResearchAgent._extract_metric_labels(fact.raw_str)) & question_labels)
         ]
         evidence_lines = "\n".join(f"- {item}" for item in dict.fromkeys(evidence[:5])) or "- No directly relevant evidence was retrieved."
         metric_lines = "\n".join(f"- {item}" for item in dict.fromkeys(metrics[:8])) or "- No relevant financial metric was identified in the retrieved evidence."
-        source_lines = "\n".join(f"- {citation}" for step in steps for citation in step.citations) or "- No source citation is available."
+        source_lines = "\n".join(f"- {citation}" for citation in relevant_citations) or "- No source citation is available."
         explanation = (
             "The answer is limited to the retrieved document evidence. "
             "Any conclusion beyond the cited facts would be unsupported. "
@@ -1561,118 +1739,105 @@ class ResearchAgent:
             text_low = (doc_text or "").lower()
             sec_title = str(meta.get("section_title", meta.get("section", ""))).lower()
             sec_type = str(meta.get("section_type", "")).lower()
+            q_low = sub_q.lower()
+            question_terms = set(ResearchAgent._extract_metric_labels(sub_q))
+            financial_terms = {
+                "revenue", "sales", "turnover", "operating income", "operating margin",
+                "gross profit", "net income", "cash flow", "debt", "liabilities",
+                "equity", "assets", "profit", "margin", "risk", "outlook", "performance"
+            }
+            text_terms = set(ResearchAgent._extract_metric_labels(doc_text))
+            topic_overlap = len(question_terms & text_terms)
+            direct_keyword_overlap = sum(1 for term in financial_terms if term in text_low and term in q_low)
+            has_financial_signal = any(term in text_low for term in [
+                "revenue", "sales", "turnover", "operating income", "operating margin", "gross profit",
+                "net income", "cash flow", "debt", "liabilities", "equity", "assets", "margin",
+                "profitability", "income", "expense", "cash", "leverage", "risk", "outlook"
+            ])
+            has_generic_context = any(term in text_low for term in [
+                "accounting policy", "accounting framework", "accounting note", "risk indicators",
+                "notes to the financial statements", "policy note", "general disclosure", "control environment"
+            ])
+            question_years = set(re.findall(r"\b(20\d{2}|19\d{2})\b", sub_q))
+            text_years = set(re.findall(r"\b(20\d{2}|19\d{2})\b", text_low))
+            has_year_match = True
+            if question_years:
+                has_year_match = bool(question_years & text_years)
+                if has_year_match:
+                    score -= 0.65
+                else:
+                    score += 0.85
+            elif report_year is not None:
+                has_year_match = bool(str(report_year) in text_low)
+                if has_year_match:
+                    score -= 0.45
+                else:
+                    score += 0.65
+            elif report_year is None:
+                has_year_match = True
+            metadata_year = meta.get("report_year") if isinstance(meta, dict) else None
+            if metadata_year is not None and question_years and str(metadata_year) not in question_years:
+                score += 0.55
+            has_company_match = bool(target_company and target_company.lower() in text_low)
 
             if self._is_table_of_contents_or_navigation(doc_text):
                 return 999.0
 
-            # Target Entity & Segment Boost
+            if topic_overlap:
+                score -= (0.45 * topic_overlap)
+            elif has_financial_signal:
+                score -= 0.15
+            else:
+                score += 1.00
+
+            if has_generic_context:
+                score += 0.90
+            if "accounting" in sec_title or "notes" in sec_title or "policy" in sec_title:
+                score += 0.70
+            if "risk factors" in sec_title or "risk" in sec_title:
+                score -= 0.25
+
+            if has_financial_signal:
+                score -= 0.20
+            if direct_keyword_overlap:
+                score -= 0.25 * direct_keyword_overlap
+            if not has_year_match and report_year:
+                score += 0.75
+            if target_company and not has_company_match:
+                score += 0.40
+
             if intent.target_entities:
                 matching_ents = sum(1 for ent in intent.target_entities if ent.lower() in text_low)
                 if matching_ents >= 2:
-                    score -= 0.50
+                    score -= 0.60
                 elif matching_ents == 1:
                     score -= 0.25
-                if any(st in sec_title for st in ["revenue & segment analysis", "segment analysis", "segment", "revenue", "breakdown"]):
-                    score -= 0.30
 
-            # Operating Margin & Profitability Relevance
-            if "operating_margin" in intent.target_metrics or "margin" in sub_q.lower():
-                if any(w in text_low for w in ["operating margin", "gross margin", "margin", "operating profit", "operating income", "cost of revenue", "sg&a", "r&d", "operating expense", "profitability"]):
-                    score -= 0.40
-                if any(w in text_low for w in ["driven by", "due to", "attributed to", "primarily reflected", "cost savings", "productivity"]):
-                    score -= 0.30
-                if any(b in sec_title for b in ["balance sheet", "financial position", "liabilities", "cash flow"]):
-                    score += 1.50
-                if ("total liabilities" in text_low or "cash and cash equivalents" in text_low or "operating activities" in text_low) and "operating margin" not in text_low and "margin" not in text_low:
-                    score += 1.20
-
-            elif "debt" in intent.target_metrics or "equity" in intent.target_metrics or "liabilities" in intent.target_metrics:
-                if any(w in text_low for w in ["debt", "liabilities", "stockholders", "equity", "borrowing", "balance sheet"]):
-                    score -= 0.35
-                if "cash flow statement" in sec_title and "debt" not in text_low:
-                    score += 1.00
-
-            elif "cash_flow" in intent.target_metrics:
-                if any(w in text_low for w in ["cash flow", "operating activities", "free cash flow", "capex"]):
-                    score -= 0.35
-                if "balance sheet" in sec_title and "cash flow" not in text_low:
-                    score += 1.00
-
-            elif "eps" in intent.target_metrics:
-                if any(w in text_low for w in ["diluted eps", "earnings per share", "per share"]):
-                    score -= 0.35
-
-            elif "segment" in intent.target_metrics:
-                if any(w in text_low for w in ["segment", "division", "breakdown", "line of business", "product category", "geography"]):
-                    score -= 0.30
-
-            # Analytical & MD&A Section boost
-            if intent.is_causal or any(w in sub_q.lower() for w in ["why", "driver", "cause", "reason", "impact", "factor"]):
+            if intent.is_causal or any(w in q_low for w in ["why", "driver", "cause", "reason", "impact", "factor"]):
                 if sec_type in {"management_discussion", "business", "summary"} or "discussion" in sec_title or "review" in sec_title or "operations" in sec_title:
-                    score -= 0.30
-
+                    score -= 0.20
                 causal_terms = [
                     "driven by", "primarily due", "due to", "attributed to",
                     "because of", "resulted from", "led by", "benefited from",
                     "as a result of", "reflecting",
                 ]
-                has_causal_language = any(term in text_low for term in causal_terms)
-                is_revenue_causal = "revenue" in intent.target_metrics or any(
-                    term in sub_q.lower() for term in ["revenue", "sales", "turnover", "top line"]
-                )
-                if is_revenue_causal:
-                    has_revenue = bool(re.search(r"\b(?:revenue|sales|turnover|top line)\b", text_low))
-                    has_change = bool(re.search(
-                        r"\b(?:increase(?:d)?|grew|growth|rose|expanded|decline(?:d)?|decrease(?:d)?|fell|reduced|change(?:d)?)\b",
-                        text_low,
-                    ))
-                    has_values = bool(re.search(r"[$€£₹¥]?\s*\d[\d,]*(?:\.\d+)?\s*(?:million|billion|bn|m|%)?", text_low))
-                    has_comparison = bool(re.search(
-                        r"\b(?:from|to|versus|vs\.?|compared with|compared to|year.over.year|prior year|previous year|fy\s*20\d{2})\b",
-                        text_low,
-                    ))
-                    if has_revenue:
-                        score -= 0.35
-                    else:
-                        score += 0.80
-                    if has_change:
-                        score -= 0.30
-                    if has_values:
-                        score -= 0.25
-                    if has_comparison:
-                        score -= 0.25
-                    if has_causal_language and has_revenue:
-                        score -= 0.55
-                    elif has_causal_language and not has_revenue:
-                        score += 0.75
+                if any(term in text_low for term in causal_terms):
+                    score -= 0.15
 
-                    if any(section in sec_title for section in [
-                        "consolidated income statement", "statement of operations", "income statement",
-                    ]):
-                        score -= 0.45
-                    elif any(section in sec_title for section in [
-                        "revenue & segment", "segment analysis", "segment", "revenue analysis",
-                    ]):
-                        score -= 0.55
-                    elif "management discussion" in sec_title or "results of operations" in sec_title:
-                        score -= 0.50
-                    elif any(section in sec_title for section in ["risk", "accounting", "notes"]):
-                        score += 0.35
+            if "revenue" in q_low and "revenue" not in text_low and "sales" not in text_low and "turnover" not in text_low:
+                score += 0.80
+            if "risk" in q_low and "risk" not in text_low and "uncertainty" not in text_low and "inflation" not in text_low and "liquidity" not in text_low:
+                score += 0.80
+            if "operating income" in q_low and "operating income" not in text_low and "operating profit" not in text_low:
+                score += 0.80
+            if "cash flow" in q_low and "cash flow" not in text_low and "operating activities" not in text_low:
+                score += 0.75
+            if "debt" in q_low and "debt" not in text_low and "liabilities" not in text_low:
+                score += 0.75
 
-                    generic_currency = any(term in text_low for term in [
-                        "foreign currency", "exchange rate", "currency volatility", "currency risk",
-                    ])
-                    if generic_currency and not (has_revenue and has_causal_language):
-                        score += 0.75
-                    if any(term in sec_title for term in ["risk factors", "risk indicators"]):
-                        score += 0.45
-                    if any(term in text_low for term in ["liabilities", "total debt", "borrowings", "balance sheet"]):
-                        if not has_revenue:
-                            score += 0.70
-
-            if meta.get("is_financial_table") or meta.get("is_table") or "(In millions)" in doc_text or "(in millions)" in text_low:
+            if meta.get("is_financial_table") or meta.get("is_table") or "(in millions)" in text_low or "(in millions)" in text_low:
                 if not intent.is_causal:
-                    score -= 0.20
+                    score -= 0.15
 
             return score
 

@@ -177,6 +177,8 @@ class OfflineAnalyzer:
                     continue
                 if self._sentence_has_nil_or_missing_value(sentence):
                     continue
+                if self._has_conflicting_positive_context(rule, sentence):
+                    continue
                 matched = any(re.search(pattern, sentence, flags=re.I) for pattern in rule["patterns"])
                 if matched and self._is_valid_risk_evidence(rule, sentence) and not self._is_generic_risk_phrase(rule, sentence):
                     source_page = self._resolve_page(metadata)
@@ -310,7 +312,13 @@ class OfflineAnalyzer:
         if category == "Legal":
             return bool(re.search(r"(?:litigation|lawsuit|investigation|penalty|regulatory).{0,100}(?:exposure|risk|claim|proceeding|material|significant|pending|settlement)", lowered))
         if category == "Market":
-            return bool(re.search(r"(?:currency|foreign exchange|fx|interest rate|rates).{0,100}(?:risk|volatility|exposure|sensitivity|headwind|pressure|fluctuation)", lowered))
+            has_fx_or_rate_signal = bool(re.search(r"(?:foreign exchange|fx|exchange rate|currency|interest rate|rates)", lowered))
+            has_explicit_risk_signal = bool(re.search(r"(?:market risk|risk factors?|drivers? of market risk|foreign exchange risk|currency risk|interest rate risk|exposure|sensitivity|volatility risk|risk from|headwind|pressure)", lowered))
+            if re.search(r"\b(?:could|may|might)\s+(?:affect|impact|pressure|hurt|weaken|reduce)\b", lowered) and not has_explicit_risk_signal:
+                return False
+            if not has_fx_or_rate_signal or not has_explicit_risk_signal:
+                return False
+            return True
         return True
 
     @staticmethod
@@ -359,6 +367,30 @@ class OfflineAnalyzer:
         if confidence >= 0.55:
             return "Medium"
         return "Low"
+
+    @staticmethod
+    def _has_conflicting_positive_context(rule: Dict[str, Any], sentence: str) -> bool:
+        lowered = sentence.casefold()
+        terms = {
+            "Liquidity": ["liquidity", "working capital", "cash position", "balance sheet", "cash flow"],
+            "Cash Flow": ["cash flow", "cash position", "working capital", "liquidity"],
+            "Debt": ["debt", "leverage", "borrowings", "net debt"],
+            "Profitability": ["margin", "profitability", "earnings", "operating income", "gross margin"],
+            "Revenue": ["revenue", "sales", "order intake", "income"],
+        }
+        relevant_terms = terms.get(rule["category"], [])
+        if not relevant_terms or not any(term in lowered for term in relevant_terms):
+            return False
+
+        positive_phrases = [
+            r"\b(?:remain(?:s)?|is|was|were)\s+stable\b",
+            r"\b(?:adequate|strong|solid|healthy|manageable)\s+(?:liquidity|cash position|balance sheet|working capital)\b",
+            r"\b(?:liquidity|balance sheet|cash position|working capital|cash flow)\s+(?:remain(?:s)?|is|was|were)\s+stable\b",
+            r"\b(?:no|not)\s+(?:material|significant)\s+(?:deterioration|decline|pressure|impact|weakness)\b",
+            r"\b(?:improved|strengthened|enhanced|recovered)\b",
+            r"\b(?:healthy|stable|managed)\b",
+        ]
+        return any(re.search(pattern, lowered) for pattern in positive_phrases)
 
     @staticmethod
     def _extract_sentences(context_chunks: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
