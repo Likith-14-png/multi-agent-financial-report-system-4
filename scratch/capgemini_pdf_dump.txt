@@ -1,0 +1,745 @@
+PDF_METADATA title='Capgemini 2025 Synthetic Financial Report' author=''
+----- PAGE 1 -----
+Capgemini 
+2025 Synthetic Financial Report 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Page 1 — Cover & Company Information 
+Company Name: Capgemini 
+Report Title: 2025 Integrated Annual Report 
+Reporting Year/Period: Fiscal Year 2025 
+Headquarters/Location: 11, rue de Tilsitt, 75017 Paris, France 
+Industry: Business and Technology Transformation (IT Services & Consulting) 
+Key Company Information: 
+●​ Global Presence: Over 420,000 experts working across more than 50 countries. 
+●​ Workforce Demographics: More than 160 different nationalities; over 40% 
+women. 
+●​ Business Model: A global leader in business and technology transformation, 
+powered by AI and driven by close to 60 years of innovation. 
+●​ Strategic Focus: Embedding AI into everything, delivering sovereign cloud 
+leadership, and expanding capabilities in data and AI. 
+●​ Acquisitions: Acquired WNS (a leader in digital Business Process Services) for 
+$3.3 billion, and Cloud4C (a provider of hybrid, private, public, and sovereign cloud 
+services). 
+●​ Innovation: Network of 21 Applied Innovation Exchanges (AIE). 
+●​ Training: 97 average hours of training per employee in 2025; 310,000 employees 
+trained in Generative AI and 194,000 in Agentic AI (excluding WNS). 
+●​ Sustainability Goal: Net zero business by 2040; 100% renewable electricity used 
+for all operations in 2025. 
+Page 2 — Executive Financial Summary 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Key Financial Metrics (For the year 2025) 
+
+----- PAGE 2 -----
+●​ Total Revenues: €22,465 million (Up 1.7% year-on-year; 3.4% at constant 
+exchange rates) 
+●​ Operating Margin: €2,983 million 
+●​ Operating Margin Rate: 13.3% of revenues 
+●​ Bookings: €24,356 million 
+●​ Book-to-Bill Ratio: 1.08 for the year 
+●​ Normalized Earnings Per Share: €9.46 
+●​ Organic Free Cash Flow: €1,949 million 
+●​ Total Equity: €11.7 billion 
+●​ Dividends Paid: €578 million (€3.40 per share) 
+●​ Share Buybacks: €542 million 
+●​ Income Tax Expense: €534 million 
+●​ Gross Wages, Salaries, Payroll Taxes and Benefits: €15,296 million 
+Page 3 — Income Statement 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Consolidated Income Statement Highlights (In millions of euros, except per share 
+amounts) 
+(Note: The source document does not provide a full detailed income statement, but 
+highlights key profitability metrics.) 
+ 
+For the year ended December 31: 
+2025 
+Revenues 
+€ 22,465 
+Operating Margin 
+€ 2,983 
+Operating Margin (%) 
+13.3% 
+Income Tax Expense 
+€ 534 
+Normalized Earnings Per Share 
+€ 9.46 
+ 
+
+----- PAGE 3 -----
+Multi-Year Normalized Earnings Per Share 
+ 
+Year 
+Normalized EPS (€) 
+2022 
+11.52 
+2023 
+12.44 
+2024 
+12.23 
+2025 
+12.95 
+Page 4 — Balance Sheet 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Balance Sheet Highlights (In millions of euros) 
+(Note: The source document does not provide a full detailed balance sheet, but 
+highlights total equity and credit rating.) 
+At December 31: 
+2025 
+Total Equity 
+€ 11,700 
+●​ Credit Rating: Standard & Poor's rating of "BBB+ with stable outlook". 
+Shareholding Structure at the end of 2025 
+●​ International institutional investors: 72.0% 
+●​ French institutional investors: 12.7% 
+●​ Group employees and Board members: 8.6% 
+●​ Individual shareholders: 6.6% 
+●​ Treasury shares: 0.1% 
+Page 5 — Cash Flow Statement 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+
+----- PAGE 4 -----
+Cash Flow Highlights (In millions of euros) 
+(Note: The source document does not provide a full detailed cash flow statement, but 
+highlights organic free cash flow generation and distributions.) 
+ 
+For the year ended December 31: 
+2025 
+Organic Free Cash Flow 
+€ 1,949 
+Dividends Paid 
+€ (578) 
+Share Buybacks 
+€ (542) 
+ 
+Multi-Year Organic Free Cash Flow 
+ 
+Year 
+Organic Free Cash Flow (€ millions) 
+2022 
+1,852 
+2023 
+1,963 
+2024 
+1,961 
+2025 
+1,949 
+Page 6 — Revenue & Segment Analysis 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Distribution of Revenues by Region (2025) 
+ 
+
+----- PAGE 5 -----
+Region 
+Percentage 
+Rest of Europe 
+30% 
+North America 
+29% 
+France 
+19% 
+United Kingdom & Ireland 
+13% 
+Asia-Pacific & Latin America 
+9% 
+ 
+Distribution of Revenues by Sector (2025) 
+ 
+Sector 
+Percentage 
+Manufacturing 
+25% 
+Financial Services 
+22% 
+Public Sector 
+15% 
+Consumer Goods & Retail 
+13% 
+Telecommunications, Media, & 
+Technology 
+12% 
+Energy & Utilities 
+8% 
+Services 
+5% 
+ 
+Distribution of Revenues by Business (2025) 
+ 
+
+----- PAGE 6 -----
+Business 
+Percentage 
+Applications & Technology 
+63% 
+Operations & Engineering 
+29% 
+Strategy & Transformation 
+8% 
+ 
+Regional Headcount (2025) 
+ 
+Region 
+Headcount 
+Asia-Pacific 
+258,000 
+Europe, Middle East, and Africa 
+132,000 
+Americas 
+33,000 
+Page 7 — Profitability & Performance Metrics 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Multi-Year Revenue Performance (In billions of euros) 
+ 
+Year 
+Revenues 
+2022 
+22.0 
+2023 
+22.5 
+2024 
+22.1 
+2025 
+22.5 
+
+----- PAGE 7 -----
+ 
+Multi-Year Operating Margin Rate (In % of revenues) 
+ 
+Year 
+Operating Margin (%) 
+2022 
+13.0% 
+2023 
+13.3% 
+2024 
+13.3% 
+2025 
+13.3% 
+ 
+Multi-Year Bookings (In billions of euros) 
+ 
+Year 
+Bookings 
+2022 
+23.7 
+2023 
+23.9 
+2024 
+23.8 
+2025 
+24.4 
+ 
+Multi-Year Dividend Per Share (In euros) 
+Page 8 — Assets, Liabilities & Accounting Information 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+
+----- PAGE 8 -----
+ 
+(Note: The Integrated Annual Report focuses heavily on ESG and high-level strategy 
+rather than detailed asset/liability breakdowns. The available data is presented below.) 
+Key Human Capital Assets (2025) 
+●​ Total Employees: 423,400 (This figure includes WNS and other late-2025 
+acquisitions; prior pages cite "420,000+" excluding late acquisitions). 
+●​ Wages and Benefits: €15,296 million paid in gross wages and salaries, payroll 
+taxes and benefits. 
+●​ Training: 34.7 million hours of training, including learning in the flow of work. 
+Supply Chain & Procurement 
+●​ Supplier Spend: €3,083 million in purchase of goods and services with suppliers. 
+●​ Responsible Sourcing: 71.8% of spend was with suppliers that have committed to 
+Capgemini's ESG standard (an increase of 32 points compared to the 2023 
+baseline). 
+Operations 
+●​ Delivery Centers: 72 delivery centers globally. 
+●​ Security Operations Centers: 8 security operations centers. 
+Page 9 — Debt, Borrowings & Financing 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+(Note: The source document does not provide a detailed breakdown of debt and 
+borrowings, but provides information on financing activities related to shareholder 
+returns.) 
+Year 
+Dividend Per Share 
+2022 
+3.25 
+2023 
+3.40 
+2024 
+3.40 
+2025 
+3.40 
+
+----- PAGE 9 -----
+Shareholder Returns & Financing Activities (2025) 
+ 
+Activity 
+Amount (€ millions) 
+Total Returned to Shareholders 
+€ 1,120 
+Dividends Paid 
+€ 578 
+Share Buybacks (Multi-year program) 
+€ 200 
+Share Buybacks (To neutralize ESOP 
+dilution) 
+€ 342 
+Capital Increase (12th ESOP) 
+€ 299 
+ 
+●​ Employee Share Ownership Plan (ESOP): The 12th ESOP led to a gross capital 
+increase of €299 million, maintaining employee shareholding at around 8% of the 
+share capital (8.4% reported). 
+Page 10 — Investment / Capital Expenditure 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Major Acquisitions in 2025 
+●​ WNS: 
+○​ Value: $3.3 billion 
+○​ Description: A leader in digital Business Process Services, enhancing 
+Capgemini's capacity to transform end-to-end business processes using 
+Agentic AI-powered Intelligent Operations. 
+○​ Scale: Added more than 60,000 employees. Increases exposure and presence 
+in the US market. 
+●​ Cloud4C: 
+○​ Description: A provider of hybrid, private, public, and sovereign cloud services. 
+○​ Scale: Added a 1,600-strong team. 
+●​ Syniti: 
+○​ Description: A data management software and services leader. 
+
+----- PAGE 10 -----
+○​ Timing: Finalized in December 2024 (prior year, but noted as a key strategic 
+move shaping 2025). 
+Page 11 — Accounting Notes 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+(Note: The Integrated Annual Report does not contain technical accounting policy notes. 
+The following details relevant governance, compensation, and reporting structures.) 
+Governance & Compensation Structure 
+●​ Board of Directors (As of March 31, 2026): 
+○​ 15 members (including 2 representing employees, 1 representing employee 
+shareholders). 
+○​ 83% independent (excluding employee representatives). 
+○​ 42% women. 
+○​ Average age: 60 years. 
+○​ Average length of office: 6 years. 
+●​ Chief Executive Officer 2026 Compensation Target Structure: 
+○​ Variable Compensation Criteria: 
+■​ 60% Financial objectives: 1. Group revenues, 2. Group operating margin 
+rate, 3. Group organic free cash flow, and 4. net profit before taxes. 
+■​ 20% Quantitative individual performance objectives aligned with the CSR 
+policy (gender diversity and cybersecurity). 
+■​ 20% Qualitative individual performance objectives covering AI deployment, 
+strategic partnering, US geographic plan, and integration of large 
+acquisitions (WNS, Cloud4C). 
+ESG Target Accounting Baseline: 
+●​ Emissions reduction targets (Scope 1, 2, and 3) use a baseline year of 2019. By 
+2025, Scope 1 and 2 emissions were reduced by 94%, and Scope 3 business travel 
+emissions per employee were reduced by 70%. 
+Page 12 — Risks & Financial Red Flags 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Identified Risks and Operational Challenges 
+●​ Macroeconomic Environment: The report notes a "volatile economic 
+environment" with "client demand proved quite selective in 2025, with a strong 
+
+----- PAGE 11 -----
+focus on efficiency, operational agility, and cost optimization." There is specific 
+mention of a "challenging market, particularly in Europe." 
+●​ Cybersecurity & Data Protection Risk: Emphasized as a critical area. The Group 
+mandates training to mitigate risk; as of December 31, 2025, 96% of the workforce 
+had completed a mandatory Cybersecurity training module, and 94% completed the 
+data protection module. 98% of operation centers and sensitive facilities are ISO 
+27001 certified. 
+●​ Talent Retention & Skills Gap: The rapid evolution of AI necessitates massive 
+reskilling to avoid operational obsolescence. Capgemini mitigated this by training 
+310,000 employees in Generative AI and 194,000 in Agentic AI. 
+●​ Technological Sovereignty: The report highlights geopolitical pressures 
+accelerating the need for "diversification and resilience strategies" and "sovereign 
+alternatives" in cloud and AI deployments. 
+Page 13 — Bills / Invoices / Transaction-Style Tables 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Accounting Transaction Examples (Source Line Items) 
+(Note: The source document does not contain literal invoices or bills. The following 
+tables extract transactional-style ESG and operational metrics reported as part of the 
+business model and achievements.) 
+Example 1: Employee Training Metrics (2025) 
+ 
+Training Category 
+Number of Employees Trained 
+Generative AI 
+310,000 
+Agentic AI 
+194,000 (excluding WNS) 
+Leadership Campus 
+100,000 
+Industry Expertise 
+170,000 
+Mandatory Cybersecurity e-learning 
+96% of headcount 
+Mandatory Data Protection e-learning 
+94% of headcount 
+
+----- PAGE 12 -----
+ 
+Example 2: Diversity and Inclusion Metrics (2025) 
+ 
+Diversity Metric 
+Percentage Achieved 
+2030 Target 
+Women in the workforce 
+40.5% 
+≥ 40% 
+Women in Group 
+executive leadership 
+positions 
+30.5% 
+≥ 35% 
+Women in the Executive 
+Committee 
+22.9% 
+30% (Mid-term) 
+ 
+Example 3: ESG Supply Chain and Community Metrics (2025) 
+ 
+ESG Metric 
+Value 
+Purchase amount with suppliers 
+committed to ESG standards 
+71.8% of total purchase amount 
+Cumulated Digital Inclusion 
+beneficiaries (since 2018) 
+8.5 million 
+Variation of booking values delivering 
+sustainability benefits 
+7% increase year-on-year 
+Page 14 — Detailed Financial Tables 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+ 
+
+----- PAGE 13 -----
+Table 1: Main ESG Achievements in 2025 against Targets 
+ 
+Priority 
+Objective 
+Metric 
+2019 
+Baseline 
+2025 
+Achieved 
+2030/2040 
+Target 
+Act on 
+climate 
+change 
+Reduce 
+Scope 1, 
+2, and 3 
+emissions 
+Absolute 
+Scope 1 
+and 2 
+emissions 
+(tCO2e) 
+154,078 
+8,747 
+90% 
+absolute 
+(2040) 
+ 
+ 
+Scope 3 
+business 
+travel 
+emissions 
+per 
+employee 
+(tCO2e/he
+ad) 
+1.26 
+0.38 
+-55% per 
+employee 
+(2030) 
+ 
+ 
+Scope 3 
+employee 
+commuting 
+emissions 
+per 
+employee 
+1.08 
+0.50 
+-55% per 
+employee 
+(2030) 
+ 
+ 
+Scope 3 
+purchased 
+goods and 
+services 
+(tCO2e) 
+305,718 
+279,527 
+-50% 
+absolute 
+(2030) 
+Invest in 
+talents 
+Reach 70 
+learning 
+hours per 
+headcount 
+Average 
+Completed 
+Learning 
+Hours 
+41.90 
+97.2 
+≥ 70 
+
+----- PAGE 14 -----
+ 
+Upskill 
+talents on 
+strategic 
+topic 
+Active 
+learners 
+on 
+strategic 
+topic 
+(Agentic 
+AI) 
+N/A 
+194,775 
+Above 
+target 
+Enhance 
+inclusion 
+Maintain 
+40% 
+women 
+globally; 
+35% in 
+leadership 
+% of 
+women in 
+the 
+workforce 
+33.0% 
+40.5% 
+≥ 40% 
+ 
+ 
+% of 
+women in 
+Group 
+executive 
+leadership 
+16.8% 
+30.5% 
+≥ 35% 
+(2030) 
+Digital 
+inclusion 
+Support 
+10m 
+beneficiari
+es 
+Cumulated 
+beneficiari
+es (since 
+2018) 
+29,012 
+8,497,643 
+10 million 
+(2030) 
+Table 2: Multi-Year Key Financial Indicators Summary 
+ 
+Indicator 
+2022 
+2023 
+2024 
+2025 
+Revenues (€ 
+billions) 
+22.0 
+22.5 
+22.1 
+22.5 
+Bookings (€ 
+billions) 
+23.7 
+23.9 
+23.8 
+24.4 
+Operating 
+13.0% 
+13.3% 
+13.3% 
+13.3% 
+
+----- PAGE 15 -----
+Margin (%) 
+Organic Free 
+Cash Flow (€ 
+millions) 
+1,852 
+1,963 
+1,961 
+1,949 
+Normalized 
+EPS (€) 
+11.52 
+12.44 
+12.23 
+12.95 
+Dividend Per 
+Share (€) 
+3.25 
+3.40 
+3.40 
+3.40 
+Page 15 — Consolidated Financial Data & Source References 
+Extracted from source report: 
+Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+Consolidated Key Metrics Table (2025) 
+ 
+Metric Name 
+Year 
+Value 
+Currency/Uni
+t 
+Source Page 
+Total 
+Revenues 
+2025 
+22,465 
+€ Millions 
+61 
+Revenue 
+Growth 
+(Constant 
+Currency) 
+2025 
+3.4 
+Percent 
+61 
+Operating 
+Margin 
+2025 
+2,983 
+€ Millions 
+61 
+Operating 
+Margin Rate 
+2025 
+13.3 
+Percent 
+61 
+Bookings 
+2025 
+24,356 
+€ Millions 
+62 
+
+----- PAGE 16 -----
+Book-to-Bill 
+Ratio 
+2025 
+1.08 
+Ratio 
+62 
+Normalized 
+Earnings Per 
+Share 
+2025 
+9.46 
+€ 
+65 
+Organic Free 
+Cash Flow 
+2025 
+1,949 
+€ Millions 
+61 
+Income Tax 
+Expense 
+2025 
+534 
+€ Millions 
+65 
+Total Equity 
+2025 
+11.7 
+€ Billions 
+64 
+Total 
+Headcount 
+(incl. 
+acquisitions) 
+2025 
+423,400 
+Employees 
+64 
+Dividend Per 
+Share 
+2025 
+3.40 
+€ 
+62 
+Total 
+Dividends 
+Paid 
+2025 
+578 
+€ Millions 
+62 
+Share 
+Buybacks 
+2025 
+542 
+€ Millions 
+62 
+WNS 
+Acquisition 
+Value 
+2025 
+3.3 
+$ Billions 
+14 
+Supplier 
+Spend 
+2025 
+3,083 
+€ Millions 
+65 
+ 
+Source References: 
+
+----- PAGE 17 -----
+●​ Original PDF Name: Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf 
+●​ Page 1 (Company Info): Pages 1, 16, 17, 66 
+●​ Page 2 (Executive Summary): Pages 61, 62, 64, 65 
+●​ Page 3 (Income Statement): Pages 61, 65 
+●​ Page 4 (Balance Sheet): Pages 62, 64 
+●​ Page 5 (Cash Flow): Pages 61, 62 
+●​ Page 6 (Revenue & Segments): Pages 16, 62 
+●​ Page 7 (Profitability): Pages 60, 61, 62 
+●​ Page 8 (Assets & Liabilities): Pages 64, 65 
+●​ Page 9 (Debt & Financing): Pages 62, 65 
+●​ Page 10 (Investments): Pages 14, 15 
+●​ Page 11 (Accounting Notes): Pages 68, 72, 73, 74 
+●​ Page 12 (Risks): Pages 21, 66, 68 
+●​ Page 13 (Transaction Examples): Pages 55, 65, 68, 71 
+●​ Page 14 (Detailed Tables): Pages 60, 61, 62, 68 
+●​ Page 15 (Consolidated): Derived from full report. 

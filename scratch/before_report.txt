@@ -1,0 +1,64 @@
+=== TOP-LEVEL CANONICAL FIELDS ===
+  company_name = 'Extracted from source'
+  report_year = '2025'
+  revenue = '€2022 billion'
+  operating_income = None
+  net_income = None
+  eps = '€9.46'
+  basic_eps = '€9.46'
+  diluted_eps = '€9.46'
+  total_assets = '€2025 billion'
+  total_liabilities = '€64 billion'
+  total_equity = '€11.7 billion'
+  cash_flow = '1,949'
+  operating_cash_flow = '€1,949 million'
+  free_cash_flow = '€1,949 million'
+  capex = None
+
+=== yearly_metrics ===
+  Revenue:
+    2023 -> '€2023 billion'
+    2024 -> '€22.0 billion'
+    2025 -> '€2022 billion'
+  Cash Flow:
+    2019 -> '2025'
+    2025 -> '1,949'
+
+=== OBSERVATIONS (metric = raw_value  [unit] @ evidence) ===
+  revenue = '€2023 billion' [unit=billion cur=EUR yr=2023 score=23.0] ev='2023'
+  revenue = '€22.0 billion' [unit=billion cur=EUR yr=2024 score=25.0] ev='●\u200b Total Revenues: €22,465 million (Up 1.7% year-on-year; 3.4% at cons'
+  revenue = '€2022 billion' [unit=billion cur=EUR yr=2025 score=23.0] ev='2022'
+  revenue = '€22,465 million' [unit=million cur=EUR yr=2025 score=30.0] ev='●\u200b Total Revenues: €22,465 million (Up 1.7% year-on-year; 3.4% at cons'
+  revenue = '€2025 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='Distribution of Revenues by Region (2025)'
+  revenue = '€2 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Total Revenues: €22,465 million (Up 1.7% year-on-year; 3.4% at cons'
+  revenue = '€16 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Page 6 (Revenue & Segments): Pages 16, 62'
+  revenue = '€22,465 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Total Revenues: €22,465 million (Up 1.7% year-on-year; 3.4% at cons'
+  revenue = '€2022 billion' [unit=billion cur=EUR yr=2025 score=23.0] ev='2022'
+  eps = '€9.46' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Normalized Earnings Per Share: €9.46'
+  tax_expense = '€534 million' [unit=million cur=EUR yr=2025 score=30.0] ev='●\u200b Income Tax Expense: €534 million'
+  tax_expense = '€534 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Income Tax Expense: €534 million'
+  total_assets = '€2025 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='Key Human Capital Assets (2025)'
+  total_assets = '€64 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Page 8 (Assets & Liabilities): Pages 64, 65'
+  total_liabilities = '€64 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Page 8 (Assets & Liabilities): Pages 64, 65'
+  total_equity = '€11.7 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Total Equity: €11.7 billion'
+  total_equity = '€11,700 billion' [unit=billion cur=EUR yr=2025 score=23.0] ev='€ 11,700'
+  total_equity = '€2025 billion' [unit=billion cur=EUR yr=2025 score=23.0] ev='Shareholding Structure at the end of 2025'
+  operating_cash_flow = '€1,949 million' [unit=million cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+  operating_cash_flow = '€4 billion' [unit=billion cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+  operating_cash_flow = '€61 billion' [unit=billion cur=EUR yr=2025 score=30.0] ev='●\u200b Page 5 (Cash Flow): Pages 61, 62'
+  operating_cash_flow = '€1,949 billion' [unit=billion cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+  operating_cash_flow = '€2025 billion' [unit=billion cur=EUR yr=2025 score=23.0] ev='Capgemini_-2026-05-20-_2025-Integrated-Annual-Report.pdf'
+  free_cash_flow = '€1,949 million' [unit=million cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+  free_cash_flow = '€4 billion' [unit=billion cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+  free_cash_flow = '€1,949 billion' [unit=billion cur=EUR yr=2025 score=38.0] ev='●\u200b Organic Free Cash Flow: €1,949 million'
+
+=== ANTI-PATTERN SCAN ===
+  FOUND 10x: '€2022 billion'
+  FOUND 4x: '€2023 billion'
+  FOUND 15x: '€2025 billion'
+  FOUND 6x: '€1,949 billion'
+  FOUND 15x: '2025 billion'
+  FOUND 3x: '€534 billion'
+  FOUND 3x: '€11,700 billion'
+  FOUND 3x: '€2 billion'
+  FOUND 3x: '€16 billion'
