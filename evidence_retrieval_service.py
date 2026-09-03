@@ -326,18 +326,11 @@ class EvidenceRetrievalService:
 
         # Company filter
         if company_name:
-            conditions.append({"$or": [
-                {"company_name": company_name},
-                {"company": company_name},
-            ]})
+            conditions.append({"company_name": company_name})
 
         # Year filter
         if year is not None:
-            year_str = str(year).strip()
-            conditions.append({"$or": [
-                {"report_year": year_str},
-                {"financial_year": year_str},
-            ]})
+            conditions.append({"report_year": str(year).strip()})
 
         # Combine with AND
         if not conditions:

@@ -5,6 +5,7 @@ deterministic calculation proofs, and claim-level evidence mappings.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -23,6 +24,48 @@ class Citation:
     page: Optional[int | str] = None
     report_year: Optional[int | str] = None
 
+    def to_clean_citation(self, preferred_company: Optional[str] = None) -> str:
+        """Format a user-friendly citation without raw chunk UUIDs or internal delimiters.
+        
+        Example outputs:
+          [Amagi FY26, Page 1-6]
+          [Amagi FY26]
+          [Amagi, Page 1-6]
+        """
+        comp = (preferred_company or "").strip()
+        if not comp or comp.lower() in ("stock tickers", "unknown", "unknown company", "company total", "general"):
+            if self.company and self.company.lower() not in ("stock tickers", "unknown", "unknown company", "company total", "general"):
+                comp = self.company.strip()
+            elif self.source_file:
+                base = re.sub(r"\.(pdf|docx|txt|html)$", "", self.source_file, flags=re.I)
+                base = re.sub(r"[-_]", " ", base).strip()
+                comp = base.split()[0] if base else "Filing"
+            else:
+                comp = "Filing"
+
+        yr_label = ""
+        if self.report_year:
+            y_str = str(self.report_year).strip()
+            if len(y_str) == 4 and y_str.isdigit():
+                yr_label = f"FY{y_str[2:]}"
+            elif y_str.upper().startswith("FY"):
+                yr_label = y_str.upper()
+            elif y_str:
+                yr_label = f"FY{y_str}"
+
+        page_label = ""
+        if self.page:
+            p_str = str(self.page).strip()
+            if not p_str.lower().startswith("page"):
+                page_label = f"Page {p_str}"
+            else:
+                page_label = p_str
+
+        comp_yr = f"{comp} {yr_label}".strip() if yr_label else comp
+        if page_label:
+            return f"[{comp_yr}, {page_label}]" if comp_yr else f"[{page_label}]"
+        return f"[{comp_yr}]" if comp_yr else "[Filing]"
+
     def __str__(self) -> str:
         page_str = f" | Page {self.page}" if self.page else ""
         year_str = f" | {self.report_year}" if self.report_year else ""
@@ -38,6 +81,7 @@ class Citation:
             "section": self.section,
             "section_title": self.section,
             "source_file": self.source_file,
+            "source_doc": self.source_file,
             "source": self.source_file,
             "chunk_id": self.chunk_id,
             "snippet": self.snippet,
@@ -45,9 +89,11 @@ class Citation:
         }
         if self.page is not None:
             d["page"] = self.page
+            d["pages"] = self.page
             d["page_number"] = self.page
         if self.report_year is not None:
             d["report_year"] = self.report_year
+        d["clean_citation"] = self.to_clean_citation()
         return d
 
 

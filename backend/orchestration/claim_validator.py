@@ -77,9 +77,10 @@ class ClaimValidator:
                     missing_gaps.append(f"Missing period: {yr}")
 
         # 4. Requirement graph checks if present
-        if intent.requirement_graph and intent.requirement_graph.requirements:
-            total_checks += len(intent.requirement_graph.requirements)
-            passed_checks += sum(1 for r in intent.requirement_graph.requirements if r.is_satisfied)
+        req_graph = getattr(intent, "requirement_graph", None)
+        if req_graph and getattr(req_graph, "requirements", None):
+            total_checks += len(req_graph.requirements)
+            passed_checks += sum(1 for r in req_graph.requirements if r.is_satisfied)
 
         if total_checks == 0:
             return (1.0, [])
@@ -177,7 +178,7 @@ class ClaimValidator:
         """Generate orthogonal multi-signal confidence representation."""
         all_citations = [c for s in steps for c in s.citations]
         all_facts = [f for s in steps for f in s.extracted_facts]
-        all_calcs = [c for s in steps for c in s.calculations]
+        all_calcs = [c for s in steps for c in getattr(s, "calculations", [])]
         raw_texts = [t for s in steps for t in s.raw_texts]
 
         cov_score, gaps = cls.compute_evidence_coverage(intent, all_facts, raw_texts)
