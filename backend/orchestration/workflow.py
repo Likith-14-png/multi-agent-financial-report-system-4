@@ -478,10 +478,23 @@ class AnalysisWorkflow:
         extracted_metrics: Dict[str, Any] = {}
         current_records = self._get_current_document_records(collection, effective_company_name, document_id)
         if current_records:
+            chunk_records = []
+            for idx, (doc, meta) in enumerate(current_records):
+                meta_dict = meta if isinstance(meta, dict) else {}
+                chunk_records.append({
+                    "chunk_id": str(meta_dict.get("chunk_id") or f"chunk-{idx}"),
+                    "chunk_index": int(meta_dict.get("chunk_index", idx)),
+                    "page_start": int(meta_dict.get("page_start", 1)) if meta_dict.get("page_start") is not None else 1,
+                    "page_end": int(meta_dict.get("page_end", 1)) if meta_dict.get("page_end") is not None else 1,
+                    "section_title": meta_dict.get("section_title", "Unknown"),
+                    "text": doc,
+                    "metadata": meta_dict,
+                    "is_table": meta_dict.get("is_table", False),
+                })
             combined_text = "\n\n".join(doc for doc, _ in current_records if isinstance(doc, str))
             doc_meta = current_records[0][1] if current_records else {}
             try:
-                extracted_metrics = extract_report_metrics(combined_text, metadata=doc_meta)
+                extracted_metrics = extract_report_metrics(combined_text, metadata=doc_meta, chunk_records=chunk_records)
             except Exception:
                 extracted_metrics = {"status": "unavailable", "error": "Extraction agent failed to complete."}
         else:

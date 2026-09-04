@@ -66,20 +66,29 @@ class FinancialReasoningEngine:
                 lines.append(f"#### {idx}. {s.sub_question}")
                 step_text = "\n".join(s.raw_texts) if s.raw_texts else "\n".join(c.snippet for c in s.citations)
 
+                step_curr = "₹" if ("₹" in step_text or "inr" in step_text.lower() or "rs." in step_text.lower() or "rupee" in step_text.lower()) else "$"
                 step_findings = []
-                debt_m = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
-                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
-                fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", step_text, re.I)
-                eps_m = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})", step_text, re.I)
+                debt_m = re.search(r"Total\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", step_text, re.I)
+                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", step_text, re.I)
+                fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*([$€£₹]?\s*[\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", step_text, re.I)
+                eps_m = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?([$€£₹]?\s*\d+\.\d{2})", step_text, re.I)
 
                 if "debt" in s.sub_question.lower() and debt_m:
-                    step_findings.append(f"- **Total Debt:** ${debt_m.group(1).strip()}")
+                    v = debt_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Total Debt:** {v}")
                 elif "revenue" in s.sub_question.lower() and rev_m:
-                    step_findings.append(f"- **Revenue:** ${rev_m.group(1).strip()}")
+                    v = rev_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Revenue:** {v}")
                 elif "cash flow" in s.sub_question.lower() and fcf_m:
-                    step_findings.append(f"- **Free Cash Flow:** ${fcf_m.group(1).strip()}")
+                    v = fcf_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Free Cash Flow:** {v}")
                 elif "eps" in s.sub_question.lower() and eps_m:
-                    step_findings.append(f"- **Diluted EPS:** ${eps_m.group(1).strip()}")
+                    v = eps_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Diluted EPS:** {v}")
                 else:
                     sentences = [st.strip() for st in step_text.splitlines() if len(st.strip()) > 20 and not st.strip().startswith(("Note:", "Step"))]
                     if sentences:
@@ -169,57 +178,67 @@ class FinancialReasoningEngine:
         # -------------------------------------------------------------- #
         # Path 3: Specific Single Financial Metrics (EPS, Cash Flow, Debt)
         # -------------------------------------------------------------- #
+        curr_sym = "₹" if ("₹" in combined_text or "inr" in combined_text.lower() or "rs." in combined_text.lower() or "rupee" in combined_text.lower()) else "$"
         metric_findings = []
 
         # EPS Extraction
         if "eps" in intent.target_metrics or "earnings per share" in question.lower():
-            eps_cont = re.search(r"continuing\s+operations[^\n:]*?:\s*\$?\s*(\d+\.\d{2})", combined_text, re.I)
-            eps_cons = re.search(r"consolidated\s+earnings\s+per\s+share[^\n:]*?:\s*\$?\s*(\d+\.\d{2})", combined_text, re.I)
-            eps_gen = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_cont = re.search(r"continuing\s+operations[^\n:]*?:\s*[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_cons = re.search(r"consolidated\s+earnings\s+per\s+share[^\n:]*?:\s*[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_gen = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
             if eps_cont:
-                metric_findings.append(f"- **Diluted EPS from Continuing Operations:** ${eps_cont.group(1)}")
+                metric_findings.append(f"- **Diluted EPS from Continuing Operations:** {curr_sym}{eps_cont.group(1)}")
             if eps_cons:
-                metric_findings.append(f"- **Consolidated Diluted EPS:** ${eps_cons.group(1)}")
+                metric_findings.append(f"- **Consolidated Diluted EPS:** {curr_sym}{eps_cons.group(1)}")
             if not eps_cont and not eps_cons and eps_gen:
-                metric_findings.append(f"- **Diluted EPS:** ${eps_gen.group(1)}")
+                metric_findings.append(f"- **Diluted EPS:** {curr_sym}{eps_gen.group(1)}")
 
         # Cash Flow Extraction
         if "cash_flow" in intent.target_metrics or "cash flow" in question.lower() or "fcf" in question.lower():
-            fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
-            ocf_m = re.search(r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*\$?\s*([\d,]+(?:\.\d+)?)", combined_text, re.I)
+            fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", combined_text, re.I)
+            ocf_m = re.search(r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?)", combined_text, re.I)
             if fcf_m:
-                metric_findings.append(f"- **Free Cash Flow:** ${fcf_m.group(1)}")
+                metric_findings.append(f"- **Free Cash Flow:** {curr_sym}{fcf_m.group(1)}")
             if ocf_m:
-                metric_findings.append(f"- **Net Cash Provided by Operating Activities:** ${ocf_m.group(1)} million")
+                metric_findings.append(f"- **Net Cash Provided by Operating Activities:** {curr_sym}{ocf_m.group(1)} million")
 
         # Revenue Extraction
         if "revenue" in intent.target_metrics or "revenue" in question.lower() or "sales" in question.lower():
-            rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?([$€£₹][\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if not rev_m:
-                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
+                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)\s*:\s*([$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?))", combined_text, re.I)
             if rev_m:
-                metric_findings.append(f"- **Total Revenue:** ${rev_m.group(1).strip()}")
+                v = rev_m.group(1).strip()
+                if not any(v.startswith(c) for c in "$€£₹"): v = f"{curr_sym}{v}"
+                metric_findings.append(f"- **Total Revenue:** {v}")
 
         # Debt and Balance Sheet Extraction
         if ("debt" in intent.target_metrics or "equity" in intent.target_metrics or "debt" in question.lower() or "liabilities" in question.lower() or "equity" in question.lower()) and "margin" not in question.lower():
-            debt_match = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            debt_match = re.search(r"Total\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if not debt_match:
-                debt_match = re.search(r"Total\s+debt\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
+                debt_match = re.search(r"Total\s+debt\s*:\s*([$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?))", combined_text, re.I)
             if debt_match:
                 val = debt_match.group(1).strip()
                 if val not in ["2020", "2021", "2022", "2023", "2024", "2025", "2026"]:
-                    metric_findings.append(f"- **Total Debt:** ${val}")
+                    if not any(val.startswith(c) for c in "$€£₹"): val = f"{curr_sym}{val}"
+                    metric_findings.append(f"- **Total Debt:** {val}")
 
-            eq_match = re.search(r"Total\s+Stockholders'?\s+Equity[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            eq_match = re.search(r"Total\s+Stockholders'?\s+Equity[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if eq_match:
-                metric_findings.append(f"- **Total Stockholders' Equity:** ${eq_match.group(1).strip()}")
+                val = eq_match.group(1).strip()
+                if not any(val.startswith(c) for c in "$€£₹"): val = f"{curr_sym}{val}"
+                metric_findings.append(f"- **Total Stockholders' Equity:** {val}")
 
-            st_debt = re.search(r"Short-term\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?)", combined_text, re.I)
-            lt_debt = re.search(r"Long-term\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?)", combined_text, re.I)
+            st_debt = re.search(r"Short-term\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?)", combined_text, re.I)
+            lt_debt = re.search(r"Long-term\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?)", combined_text, re.I)
             if st_debt:
-                metric_findings.append(f"- **Short-Term Debt:** ${st_debt.group(1)}")
+                val = st_debt.group(1).strip()
+                if not any(val.startswith(c) for c in "$€£₹"): val = f"{curr_sym}{val}"
+                metric_findings.append(f"- **Short-Term Debt:** {val}")
             if lt_debt:
-                metric_findings.append(f"- **Long-Term Debt:** ${lt_debt.group(1)}")
+                val = lt_debt.group(1).strip()
+                if not any(val.startswith(c) for c in "$€£₹"): val = f"{curr_sym}{val}"
+                metric_findings.append(f"- **Long-Term Debt:** {val}")
 
         if metric_findings and not intent.is_causal and "margin" not in question.lower():
             header_title = "Financial Metrics Summary"
@@ -397,22 +416,61 @@ class FinancialReasoningEngine:
         """Formulate a grounded LLM prompt with structured facts and raw passages."""
         evidence_block = []
         for s in steps:
-            evidence_block.append(f"Sub-question: {s.sub_question}")
-            if s.raw_texts:
-                for idx, t in enumerate(s.raw_texts):
-                    cit_str = str(s.citations[idx]) if idx < len(s.citations) else "Document Filing"
-                    evidence_block.append(f"- Excerpt [{cit_str}]:\n{t}\n")
-            else:
-                for c in s.citations:
-                    evidence_block.append(f"- Excerpt [{c}]:\n{c.snippet}\n")
+            sub_q_str = str(getattr(s, "sub_question", "") or "").strip()
+            if sub_q_str:
+                evidence_block.append(f"Sub-question: {sub_q_str}")
 
+            passages = []
+            if getattr(s, "raw_texts", None):
+                for idx, t in enumerate(s.raw_texts):
+                    t_str = str(t or "").strip()
+                    if not t_str:
+                        continue
+                    cit_str = str(s.citations[idx]) if (s.citations and idx < len(s.citations)) else "Document Filing"
+                    passages.append(f"- Excerpt [{cit_str}]:\n{t_str}\n")
+            if not passages and getattr(s, "citations", None):
+                for c in s.citations:
+                    snip = str(getattr(c, "snippet", "") or "").strip()
+                    if not snip:
+                        continue
+                    passages.append(f"- Excerpt [{c}]:\n{snip}\n")
+
+            if getattr(s, "extracted_facts", None):
+                fact_lines = []
+                for f in s.extracted_facts:
+                    raw_val = str(getattr(f, "raw_str", "") or "").strip()
+                    num_val = getattr(f, "value", None)
+                    metric_lbl = str(getattr(f, "metric", "") or "Financial Metric").strip()
+                    period_lbl = str(getattr(f, "period", "") or "").strip()
+                    unit_lbl = str(getattr(f, "unit", "") or "").strip()
+                    curr_lbl = str(getattr(f, "currency", "") or "").strip()
+
+                    val_str = raw_val or (f"{curr_lbl} {num_val} {unit_lbl}".strip() if num_val is not None else "")
+                    if val_str:
+                        p_str = f" ({period_lbl})" if period_lbl else ""
+                        fact_lines.append(f"  * {metric_lbl}{p_str}: {val_str}")
+                if fact_lines:
+                    passages.append("- Extracted Financial Metrics:\n" + "\n".join(fact_lines) + "\n")
+
+            if passages:
+                evidence_block.extend(passages)
+            elif getattr(s, "findings", None) and str(s.findings).strip():
+                evidence_block.append(f"- Excerpt [Document Filing]:\n{str(s.findings).strip()}\n")
+
+        raw_entities = getattr(intent, 'target_entities', []) or []
+        entities_str = ', '.join(str(e) for e in raw_entities if e) if raw_entities else 'Company Total'
+
+        raw_metrics = getattr(intent, 'target_metrics', []) or []
+        metrics_str = ', '.join(str(m) for m in raw_metrics if m) if raw_metrics else 'General Financial Context'
+
+        clean_evidence_text = "\n".join(evidence_block).strip() or "No verified document excerpts available."
         return (
             f"You are a senior financial research analyst.\n\n"
             f"USER QUESTION: {question}\n"
             f"IDENTIFIED INTENT: {intent.intent_type.value} (Causal: {intent.is_causal}, Comparative: {intent.is_comparative})\n"
-            f"TARGET ENTITIES: {', '.join(intent.target_entities) if intent.target_entities else 'Company Total'}\n"
-            f"TARGET METRICS: {', '.join(intent.target_metrics) if intent.target_metrics else 'General Financial Context'}\n\n"
-            f"RETRIEVED SOURCE PASSAGES:\n" + "\n".join(evidence_block) + "\n\n"
+            f"TARGET ENTITIES: {entities_str}\n"
+            f"TARGET METRICS: {metrics_str}\n\n"
+            f"RETRIEVED SOURCE PASSAGES:\n{clean_evidence_text}\n\n"
             f"TASK & INSTRUCTIONS:\n"
             f"Answer the user's question directly, concisely, and with complete precision using ONLY the evidence above.\n\n"
             f"CRITICAL GROUNDING RULES:\n"

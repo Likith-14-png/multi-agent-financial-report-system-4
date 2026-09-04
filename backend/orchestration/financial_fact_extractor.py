@@ -231,11 +231,12 @@ class FinancialFactExtractor:
 
         # 1. Extract from multi-column tables
         tables = cls.extract_tables_from_text(text)
+        curr_sym = "₹" if ("₹" in text or "inr" in text.lower() or "rs." in text.lower()) else "$"
         for t in tables:
+            t_curr = getattr(t, "currency_symbol", curr_sym) or curr_sym
             for r in t.rows:
                 clean_entity = r.label.replace("Total ", "").strip()
                 # Determine metric identity from row label or section title
-                metric_name = "revenue"
                 lbl_low = clean_entity.lower()
                 if "operating income" in lbl_low or "operating profit" in lbl_low:
                     metric_name = "operating_income"
@@ -247,12 +248,20 @@ class FinancialFactExtractor:
                     metric_name = "operating_margin"
                 elif "operating expense" in lbl_low or "sg&a" in lbl_low or "r&d" in lbl_low:
                     metric_name = "operating_expenses"
-                elif "total debt" in lbl_low:
+                elif "total debt" in lbl_low or "debt" in lbl_low:
                     metric_name = "total_debt"
-                elif "total assets" in lbl_low:
+                elif "total assets" in lbl_low or "assets" in lbl_low:
                     metric_name = "total_assets"
-                elif "total liabilities" in lbl_low:
+                elif "total liabilities" in lbl_low or "liabilities" in lbl_low:
                     metric_name = "total_liabilities"
+                elif "equity" in lbl_low:
+                    metric_name = "total_equity"
+                elif "cash" in lbl_low:
+                    metric_name = "cash_and_cash_equivalents"
+                elif "revenue" in lbl_low or "sales" in lbl_low or "turnover" in lbl_low:
+                    metric_name = "revenue"
+                else:
+                    metric_name = r.label.strip().lower().replace(" ", "_")
 
                 for idx, val in enumerate(r.values):
                     year = t.years[idx] if idx < len(t.years) else "2025"
@@ -262,7 +271,7 @@ class FinancialFactExtractor:
                             metric=metric_name,
                             period=year,
                             value=val,
-                            raw_str=f"${val:,.0f}M" if abs(val) > 50 else f"${val:,.2f}",
+                            raw_str=f"{t_curr}{val:,.0f}M" if abs(val) > 50 else f"{t_curr}{val:,.2f}",
                             unit="millions",
                             statement_type="segment_analysis" if "segment" in section.lower() else "financial_statement",
                             chunk_id=chunk_id,
@@ -270,6 +279,7 @@ class FinancialFactExtractor:
                             page=page,
                             company=company,
                             source_file=source_file,
+                            currency=t_curr,
                         )
                     )
 

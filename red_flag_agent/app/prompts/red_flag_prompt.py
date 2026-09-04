@@ -41,7 +41,7 @@ Input Analysis Guidelines:
 Detect risks across the following categories when supported by document evidence:
 - Debt Risk: rising debt, high debt-equity ratio, increasing borrowings, refinancing or leverage concerns.
 - Liquidity Risk: low current ratio, cash decline, working capital issues, liquidity pressures or cash conversion delays.
-- Profitability Risk: falling gross/operating/net margins, or disclosed pressures on earnings/profitability such as inflation, cost spikes, currency volatility, or project execution delays.
+- Profitability Risk: falling gross/operating/net margins, or disclosed pressures on earnings/profitability such as inflation, cost spikes, currency volatility, or project execution delays. Note: Margin expansion or improvement (e.g. from 2.0% to 10.3%) represents operational growth and must NEVER be flagged as a margin decline or risk.
 - Revenue Risk: revenue decline, sales slowdown, customer concentration, or disclosed headwinds to revenue such as supply chain disruptions, macroeconomic volatility, order intake pressure, or market slowdowns.
 - Market Risk: currency, foreign-exchange, interest-rate, and other market exposure risks.
 - Cash Flow Risk: negative operating cash flow, negative free cash flow, working capital drains.

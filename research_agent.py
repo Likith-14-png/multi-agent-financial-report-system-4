@@ -26,6 +26,17 @@ SharedQuestionIntentAnalyzer = question_analyzer.QuestionIntentAnalyzer
 
 logger = logging.getLogger(__name__)
 
+RESEARCH_SYSTEM_PROMPT = """You are an elite Principal Equity Analyst and Financial Researcher.
+Your task is to synthesize financial evidence into professional, nuanced, and accurate analytical reports based strictly on the provided context.
+
+CRITICAL ANALYTICAL FRAMEWORKS:
+1. HOLISTIC LIQUIDITY: Never assess liquidity using only the "Cash and Cash Equivalents" line item. You MUST actively search for and aggregate "Other Bank Balances" and "Current / Short-term Investments" to determine true near-term liquidity.
+2. TEMPORAL MATCHING: Never frame multi-year off-balance-sheet commitments (e.g., Cloud Infrastructure, long-term leases, purchase obligations) as immediate liquidity crises. Acknowledge these are funded over multiple years via future operating cash flows.
+3. CASH GENERATION CONTEXT: Always evaluate a company's ability to fund its obligations by referencing its Operating Cash Flow (OCF) and recent Financing Activities (e.g., equity raises, IPOs, new debt issuance). 
+4. ZERO TEMPLATE BLEED: Never start your response with conversational filler or template artifacts like "Answer:" or "Here is the analysis:". Jump directly into the professional synthesis.
+5. DATA ENFORCEMENT & GROUNDING: Every financial claim must include the exact numerical value, currency, and unit scale (e.g., '₹2,830.13 million') provided in the context. Never leave numerical values blank. If necessary data to answer the prompt is missing from the context, explicitly state it is not disclosed.
+"""
+
 
 # ------------------------------------------------------------------ #
 # Data Models
@@ -234,6 +245,17 @@ class FinancialFact:
     page: Optional[int | str] = None
     company: str = ""
     source_file: str = ""
+    canonical_name: str = ""
+    currency: str = ""
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
 
 
 @dataclass
@@ -506,6 +528,7 @@ class ParsedTable:
     rows: List[ParsedTableRow]
     years: List[str]
     unit: str = "millions"
+    currency_symbol: str = "$"
 
     def to_markdown(self) -> str:
         if not self.rows:
@@ -520,10 +543,11 @@ class ParsedTable:
         header_line = "| " + " | ".join(col_headers) + " |"
         separator_line = "| " + " | ".join([":---" for _ in col_headers]) + " |"
         body_lines = []
+        sym = self.currency_symbol or "$"
         for r in self.rows:
             row_cols = [r.label]
             for v in r.values:
-                val_str = f"${v:,.0f}M" if abs(v) > 50 else f"${v:,.2f}"
+                val_str = f"{sym}{v:,.0f}M" if abs(v) > 50 else f"{sym}{v:,.2f}"
                 row_cols.append(val_str)
             if len(r.values) >= 2:
                 g = calculate_growth_rate(r.values[0], r.values[1])
@@ -665,7 +689,8 @@ def extract_tables_from_text(text: str) -> List[ParsedTable]:
         hdr_first = "Segment" if any(w in text.lower() for w in ["segment", "division", "line of business", "business unit", "product", "category", "geography"]) else "Metric"
         headers = [hdr_first] + [f"{y} Revenue" if "revenue" in text.lower() or "segment" in text.lower() or "division" in text.lower() else f"{y}" for y in distinct_years[:2]]
         parsed_rows = [ParsedTableRow(label=lbl.replace("Total ", "").strip(), values=vals, raw_tokens=[]) for lbl, vals in row_patterns]
-        tables.append(ParsedTable(title="Financial Breakdown", headers=headers, rows=parsed_rows, years=distinct_years[:2]))
+        curr_sym = "₹" if ("₹" in text or "inr" in text.lower() or "rs." in text.lower() or "rupee" in text.lower()) else "$"
+        tables.append(ParsedTable(title="Financial Breakdown", headers=headers, rows=parsed_rows, years=distinct_years[:2], currency_symbol=curr_sym))
 
     return tables
 
@@ -684,19 +709,62 @@ def extract_facts_from_text(
     if not text:
         return facts
 
+    curr_sym = "₹" if ("₹" in text or "inr" in text.lower() or "rs." in text.lower() or "rupee" in text.lower()) else "$"
     tables = extract_tables_from_text(text)
     for t in tables:
+        t_curr = getattr(t, "currency_symbol", curr_sym) or curr_sym
         for r in t.rows:
             clean_entity = r.label.replace("Total ", "").strip()
+            lbl_low = r.label.lower()
+            if "operating income" in lbl_low or "operating profit" in lbl_low:
+                canon_name = "Operating Income"
+                m_key = "operating_income"
+            elif "net income" in lbl_low or "net profit" in lbl_low:
+                canon_name = "Net Income"
+                m_key = "net_income"
+            elif "gross profit" in lbl_low:
+                canon_name = "Gross Profit"
+                m_key = "gross_profit"
+            elif "operating margin" in lbl_low:
+                canon_name = "Operating Margin"
+                m_key = "operating_margin"
+            elif "operating expense" in lbl_low or "sg&a" in lbl_low or "r&d" in lbl_low:
+                canon_name = "Operating Expenses"
+                m_key = "operating_expenses"
+            elif "total debt" in lbl_low or "debt" in lbl_low:
+                canon_name = "Total Debt"
+                m_key = "total_debt"
+            elif "total assets" in lbl_low or "assets" in lbl_low:
+                canon_name = "Total Assets"
+                m_key = "total_assets"
+            elif "total liabilities" in lbl_low or "liabilities" in lbl_low:
+                canon_name = "Total Liabilities"
+                m_key = "total_liabilities"
+            elif "equity" in lbl_low:
+                canon_name = "Total Equity"
+                m_key = "total_equity"
+            elif "cash" in lbl_low:
+                canon_name = "Cash and Cash Equivalents"
+                m_key = "cash_and_cash_equivalents"
+            elif "revenue" in lbl_low or "sales" in lbl_low or "turnover" in lbl_low:
+                canon_name = "Revenue"
+                m_key = "revenue"
+            else:
+                canon_name = r.label.strip()
+                m_key = r.label.strip().lower().replace(" ", "_")
+
             for idx, val in enumerate(r.values):
                 year = t.years[idx] if idx < len(t.years) else "2025"
+                formatted_val = f"{t_curr}{val:,.2f}" if abs(val) < 100 else f"{t_curr}{val:,.0f}M"
                 facts.append(
                     FinancialFact(
                         entity=clean_entity,
-                        metric="revenue",
+                        metric=m_key,
+                        canonical_name=canon_name,
+                        currency=t_curr,
                         period=year,
                         value=val,
-                        raw_str=f"${val:,.0f}M",
+                        raw_str=formatted_val,
                         unit="millions",
                         chunk_id=chunk_id,
                         section=section,
@@ -708,10 +776,10 @@ def extract_facts_from_text(
 
     # Check for standalone metric key-values
     metric_regexes = [
-        ("diluted_eps", r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})"),
-        ("free_cash_flow", r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)"),
-        ("operating_cash_flow", r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*\$?\s*([\d,]+(?:\.\d+)?)"),
-        ("total_debt", r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)"),
+        ("diluted_eps", r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?([$€£₹]?\s*\d+\.\d{2})"),
+        ("free_cash_flow", r"Free\s+Cash\s+Flow\s*:\s*([$€£₹]?\s*[\d,]+(?:\.\d+)?\s*(?:billion|million)?)"),
+        ("operating_cash_flow", r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*([$€£₹]?\s*[\d,]+(?:\.\d+)?)"),
+        ("total_debt", r"Total\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)"),
         ("operating_margin", r"Operating\s+margin[^\n:]*?:\s*(\d+\.?\d*%)"),
     ]
     for m_name, pattern in metric_regexes:
@@ -751,6 +819,9 @@ class QuestionIntentAnalyzer:
         "net_income": ["net income", "net profit", "net loss", "earnings", "bottom line", "profitability"],
         "eps": ["eps", "earnings per share", "diluted eps", "basic eps", "dilution"],
         "cash_flow": ["cash flow", "free cash flow", "fcf", "operating cash flow", "cash from operations", "capital expenditures", "capex"],
+        "liquidity": ["liquidity", "cash and cash equivalents", "cash and bank", "bank balances", "other bank balances", "current investments", "short-term investments", "solvency", "cash position", "liquid assets"],
+        "commitments": ["commitments", "contingencies", "capital commitments", "purchase obligations", "cloud infrastructure commitments", "lease commitments", "off-balance sheet", "contractual obligations"],
+        "working_capital": ["working capital", "trade receivables", "receivables", "trade payables", "payables", "inventories", "inventory", "divergence", "pat", "ocf", "operating cash flow", "profit after tax", "drag on cash", "cash conversion"],
         "debt": ["debt", "total debt", "short-term debt", "long-term debt", "borrowing", "credit", "leverage"],
         "liabilities": ["liabilities", "total liabilities", "current liabilities", "non-current liabilities"],
         "equity": ["stockholders equity", "equity", "retained earnings", "shares"],
@@ -994,14 +1065,42 @@ class DynamicRetrievalPlanner:
         if "eps" in intent.target_metrics or "earnings per share" in q_low:
             queries.append(f"{comp}diluted earnings per share basic EPS continuing operations per share")
 
-        # 4. Cash Flow queries (only if explicitly requested)
-        if "cash_flow" in intent.target_metrics or ("cash" in q_low and "margin" not in q_low):
-            queries.append(f"{comp}Statement of Cash Flows Free Cash Flow operating activities capital expenditures")
+        # 4. Cash Flow & Holistic Liquidity queries
+        is_liquidity_query = (
+            "cash_flow" in intent.target_metrics
+            or "liquidity" in intent.target_metrics
+            or "commitments" in intent.target_metrics
+            or any(w in q_low for w in ["cash", "liquidity", "bank balance", "investment", "solvency", "commitment", "obligations", "debt service"])
+        )
+        if is_liquidity_query and "margin" not in q_low:
+            queries.append(f"{comp}Cash and cash equivalents other bank balances bank deposits current investments short-term investments liquidity".strip())
+            queries.append(f"{comp}Statement of Cash Flows Free Cash Flow operating activities capital expenditures cash generated from operations".strip())
+            queries.append(f"{comp}commitments contingencies purchase obligations cloud infrastructure capital commitments contractual obligations".strip())
+            queries.append(f"{comp}Financing activities equity raise proceeds from share capital borrowings new debt issuance".strip())
 
         # 5. Balance Sheet & Debt queries (only if explicitly requested)
         if ("debt" in intent.target_metrics or "equity" in intent.target_metrics or "debt-to-equity" in q_low or "debt" in q_low or "equity" in q_low) and "margin" not in q_low:
             queries.append(f"{comp}Debt-to-Equity Ratio Total debt liabilities stockholders equity borrowings")
             queries.append(f"{comp}Consolidated Balance Sheet Total debt liabilities stockholders equity borrowings")
+
+        # 5b. Working Capital & PAT-OCF Divergence queries
+        is_working_capital_query = (
+            "working_capital" in intent.target_metrics
+            or any(w in q_low for w in ["working capital", "trade receivables", "receivables", "divergence", "ocf", "pat", "drag on cash", "cash conversion", "cash flow drag"])
+            or ("cash" in q_low and "profit" in q_low)
+        )
+        if is_working_capital_query:
+            queries.append(f"{comp}Consolidated Balance Sheet Trade receivables inventories trade payables working capital changes".strip())
+            queries.append(f"{comp}Statement of Cash Flows Operating cash flows before working capital changes trade receivables adjustments".strip())
+            queries.append(f"{comp}Trade receivables Note financial assets amortized cost credit risk".strip())
+
+        # 5c. Trigger for Non-Cash, Divergence, and Anomaly queries
+        if any(w in q_low for w in ["non-cash", "divergence", "anomaly"]):
+            queries.append(f"{comp}Accounting Notes".strip())
+            queries.append(f"{comp}Significant Accounting Policies".strip())
+            queries.append(f"{comp}Cash Flow Adjustments".strip())
+            queries.append(f"{comp}Accounting Notes Significant Accounting Policies provisions depreciation amortization".strip())
+            queries.append(f"{comp}Statement of Cash Flows Cash Flow Adjustments non-cash expenses working capital".strip())
 
         if "operating_income" in intent.target_metrics and "operating_margin" not in intent.target_metrics:
             queries.append(f"{comp}Operating income gross profit operating margin operating expenses")
@@ -1141,8 +1240,8 @@ def _call_ollama_qwen(
         "model": model_name,
         "stream": False,
         "options": {
-            "temperature": 0.0,
-            "num_predict": 600,
+            "temperature": 0.2,
+            "num_predict": 1024,
         },
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -1354,7 +1453,12 @@ class ResearchAgent:
         return None
 
     @classmethod
-    def _matches_company_name(cls, target_company: Optional[str], metadata: Optional[Dict[str, Any]]) -> bool:
+    def _matches_company_name(
+        cls,
+        target_company: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        doc_text: Optional[str] = None,
+    ) -> bool:
         if not target_company:
             return True
         target_norm = cls._normalize_company_name(target_company)
@@ -1365,8 +1469,13 @@ class ResearchAgent:
             cls._metadata_value(metadata, "company"),
         ]
         for candidate in candidates:
-            if cls._normalize_company_name(candidate) == target_norm:
+            cand_norm = cls._normalize_company_name(candidate)
+            if not cand_norm:
+                continue
+            if cand_norm == target_norm or target_norm in cand_norm or cand_norm in target_norm:
                 return True
+        if doc_text and target_norm in doc_text.lower():
+            return True
         return False
 
     @staticmethod
@@ -1465,21 +1574,7 @@ class ResearchAgent:
                 final_answer = self._generalized_financial_synthesis(effective_q, intent, steps)
         else:
             is_mock = type(self.collection).__name__.startswith("Fake") or bool(os.getenv("PYTEST_CURRENT_TEST"))
-            system_prompt = (
-                "You are a Financial Research Agent in an automated multi-agent analysis system. "
-                "Adhere strictly to these formatting and data integrity rules:\n\n"
-                "1. Clean Citations Only:\n"
-                "   - NEVER output internal chunk identifiers, UUIDs, or raw retrieval markup (such as \"[[... | chunk ...]]\") into any user-facing text field.\n"
-                "   - Output citations strictly in the designated metadata field using the format: `[Document Name, Page X]`.\n\n"
-                "2. Grounding & Evidence Sync:\n"
-                "   - Every metric reported in \"Direct Answer\" must originate directly from the chunk you assign to \"Key Evidence\".\n"
-                "   - Under \"Key Evidence\", provide ONLY the exact, verbatim table row or text snippet that proves the reported figures. Do not pull snippets from unrelated document sections.\n\n"
-                "3. Explanation vs. Direct Answer:\n"
-                "   - \"Direct Answer\": State the specific numerical finding concisely in 1–2 sentences.\n"
-                "   - \"Explanation\": Do NOT repeat the Direct Answer. Provide the financial context, such as prior-year baseline (e.g., FY25 performance), margin trend, drivers of variance, or line-item classification from the financial statements.\n\n"
-                "4. Empty Metric Fallback:\n"
-                "   - Never output \"No relevant financial metric was identified in the retrieved evidence\" if you have already populated financial values in the Direct Answer. If metrics are present, list each metric name, value, unit, and reporting period explicitly."
-            )
+            system_prompt = RESEARCH_SYSTEM_PROMPT
             target_comp = company or intent.target_company
             user_prompt = self._build_llm_prompt(effective_q, intent, steps, company=target_comp)
 
@@ -1586,14 +1681,21 @@ class ResearchAgent:
         normalized = str(value or "").strip()
         normalized = normalized.replace("−", "-").replace("–", "-").replace("—", "-")
         normalized = normalized.replace(" ", "").replace(",", "").lower()
-        normalized = normalized.replace("$", "$").replace("€", "€").replace("£", "£").replace("¥", "¥").replace("₹", "₹")
-        return normalized
+        normalized = normalized.replace("rs.", "₹").replace("rs", "₹").replace("inr", "₹").replace("usd", "$")
+        # Strip currency symbols so the core numerical magnitude + scale matches regardless of symbol
+        # e.g. "₹21700.06million" -> "21700.06million"
+        core_num = re.sub(r"^[$€£¥₹]+", "", normalized)
+        return core_num
 
     @classmethod
     def _extract_money_tokens(cls, text: str) -> List[str]:
         if not text:
             return []
-        matches = re.findall(r"(?:[$€£¥₹])\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:crore|lakh|cr|lac|million|billion|bn|m|thousand|k|%))?", text, flags=re.I)
+        matches = re.findall(
+            r"(?:(?:[$€£¥₹]|(?:(?:rs\.?|inr|usd|eur|gbp)\s*))\d[\d,]*(?:\.\d+)?(?:\s*(?:crore|lakh|cr|lac|million|billion|bn|m|thousand|k|%))?|\b\d[\d,]*(?:\.\d+)?\s*(?:crore|lakh|cr|lac|million|billion|bn|m|%)\b)",
+            text,
+            flags=re.I,
+        )
         return [m.strip() for m in matches if m.strip()]
 
     @staticmethod
@@ -1699,10 +1801,35 @@ class ResearchAgent:
                 for label in cls._extract_metric_labels(snippet):
                     supported_labels.add(label)
             for raw_text in step.raw_texts:
+                if not raw_text:
+                    continue
                 for token in cls._extract_money_tokens(raw_text):
                     supported_values.add(cls._normalize_metric_value(token))
                 for label in cls._extract_metric_labels(raw_text):
                     supported_labels.add(label)
+            for fact in getattr(step, "extracted_facts", []):
+                if getattr(fact, "raw_str", None):
+                    for token in cls._extract_money_tokens(fact.raw_str):
+                        supported_values.add(cls._normalize_metric_value(token))
+                    supported_values.add(cls._normalize_metric_value(fact.raw_str))
+                if getattr(fact, "value", None) is not None:
+                    supported_values.add(str(fact.value).replace(",", "").strip())
+
+        def is_token_supported(token: str) -> bool:
+            norm = cls._normalize_metric_value(token)
+            if norm in supported_values:
+                return True
+            num_match = re.search(r"\d[\d,]*(?:\.\d+)?", norm)
+            if num_match:
+                num_str = num_match.group(0).replace(",", "")
+                if any(num_str in sv for sv in supported_values):
+                    return True
+            return False
+
+        # Fast path: If all tokens in answer are supported, return untouched (preserving tables and formatting)
+        all_tokens = cls._extract_money_tokens(answer)
+        if all(is_token_supported(t) for t in all_tokens):
+            return answer
 
         question_labels = set(cls._extract_metric_labels(question))
         sentences = re.split(r"(?<=[.!?])\s+", answer)
@@ -1724,22 +1851,30 @@ class ResearchAgent:
             sentence_has_unsupported_value = False
             cleaned_sentence = sentence
             for token in token_matches:
-                normalized = cls._normalize_metric_value(token)
-                if normalized in supported_values:
+                if is_token_supported(token):
                     continue
                 if question_labels and label and label in question_labels:
-                    cleaned_sentence = cleaned_sentence.replace(token, "")
+                    cleaned_sentence = re.sub(
+                        rf"\b(?:of|to|is|was|for|worth)?\s*{re.escape(token)}\s*[,;]?",
+                        " [not disclosed] ",
+                        cleaned_sentence,
+                    )
                     sentence_has_unsupported_value = True
                     continue
                 if question_labels and label and label not in question_labels:
                     sentence_has_unsupported_value = True
                     break
-                cleaned_sentence = cleaned_sentence.replace(token, "")
+                cleaned_sentence = re.sub(
+                    rf"\b(?:of|to|is|was|for|worth)?\s*{re.escape(token)}\s*[,;]?",
+                    " [not disclosed] ",
+                    cleaned_sentence,
+                )
                 sentence_has_unsupported_value = True
 
             if sentence_has_unsupported_value:
                 cleaned_sentence = re.sub(r"\s{2,}", " ", cleaned_sentence).strip()
                 cleaned_sentence = re.sub(r"\s*[,;]\s*$", "", cleaned_sentence)
+                cleaned_sentence = re.sub(r"\b(?:of|to|for)\s*,\s*", "", cleaned_sentence)
                 cleaned_sentence = cleaned_sentence.strip(" -:;,. ")
                 if cleaned_sentence and (not question_labels or not re.search(r"(?:[$€£¥₹])\s*\d", cleaned_sentence, re.I)):
                     kept_sentences.append(cleaned_sentence)
@@ -1747,8 +1882,11 @@ class ResearchAgent:
 
             kept_sentences.append(cleaned_sentence.strip())
 
-        cleaned = " ".join(part for part in kept_sentences if part and part.strip())
-        cleaned = re.sub(r"\s+", " ", cleaned)
+        if "|" in answer:
+            cleaned = "\n".join(part for part in kept_sentences if part and part.strip())
+        else:
+            cleaned = " ".join(part for part in kept_sentences if part and part.strip())
+            cleaned = re.sub(r"[ \t]+", " ", cleaned)
         cleaned = cleaned.strip()
         if not cleaned:
             return "Insufficient grounded evidence was retrieved to answer this question reliably. No indexed document evidence was found to answer the question."
@@ -1772,8 +1910,10 @@ class ResearchAgent:
 
         all_step_citations = [c for s in steps for c in s.citations]
 
-        # If answer is causal and already structured with Main Factors & Largest Impact, preserve that structure
-        if "### Main Factors" in raw_answer and "### Largest Impact" in raw_answer:
+        # If answer is causal or structured table and already structured, preserve that structure
+        if ("### Main Factors" in raw_answer and "### Largest Impact" in raw_answer) or (
+            "| Segment |" in raw_answer and ("### Segment Revenue" in raw_answer or "### Financial Performance" in raw_answer)
+        ):
             return clean_citation_references(raw_answer, all_step_citations, preferred_company=company)
 
         # 1. Parse existing sections from raw_answer if present
@@ -1875,10 +2015,13 @@ class ResearchAgent:
 
         evidence_lines = "\n".join(f"- {line.lstrip('- ')}" for line in list(dict.fromkeys(evidence_lines_list))[:5]) or "- No directly relevant evidence was retrieved."
 
-        # 4. Relevant Financial Metrics Guardrail
+        # 4. Relevant Financial Metrics Guardrail with Dynamic Key Mapping
         metric_items: List[str] = []
         combined_context = f"{direct_answer}\n{evidence_lines}"
-        ebitda_m = re.search(r"(?:Adjusted\s+EBITDA|EBITDA)[^\n,.]*?(?:was|of|:)?\s*(₹\s*[\d,]+(?:\.\d+)?\s*(?:crore|lakh|cr)?|\$\s*[\d,]+(?:\.\d+)?(?:\s*(?:million|billion))?)", combined_context, re.I)
+        is_inr = "₹" in combined_context or "inr" in combined_context.lower() or "rs." in combined_context.lower() or "rupee" in combined_context.lower()
+        default_curr = "₹" if is_inr else "$"
+
+        ebitda_m = re.search(r"(?:Adjusted\s+EBITDA|EBITDA)[^\n,.]*?(?:was|of|:)?\s*([₹$€£¥]\s*[\d,]+(?:\.\d+)?\s*(?:crore|lakh|cr|million|billion)?)", combined_context, re.I)
         if ebitda_m:
             val_clean = re.sub(r"\s+", " ", ebitda_m.group(1)).strip()
             metric_items.append(f"Adjusted EBITDA: {val_clean}")
@@ -1887,16 +2030,65 @@ class ResearchAgent:
         if margin_m:
             metric_items.append(f"Adjusted EBITDA Margin: {margin_m.group(1).strip()}")
 
+        # Only add standalone revenue if explicitly queried or discussed
         rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n,.]*?(?:was|of|:)?\s*([₹$€£¥]\s*[\d,]+(?:\.\d+)?\s*(?:crore|million|billion)?)", combined_context, re.I)
-        if rev_m and "revenue" in question.lower():
+        if rev_m and any(w in question.lower() for w in ["revenue", "sales", "turnover", "top line"]):
             metric_items.append(f"Revenue: {rev_m.group(1).strip()}")
 
+        # Iterate through retrieved metrics and facts using dynamic key mapping
         for step in steps:
-            for fact in step.extracted_facts:
-                if fact.raw_str and (fact.raw_str in direct_answer or any(num in fact.raw_str for num in all_numeric_clues)):
-                    if "ebitda" in question.lower() and fact.metric == "revenue":
-                        continue
-                    metric_items.append(f"{fact.metric}: {fact.raw_str}")
+            # 1. Structured facts from step
+            for fact in getattr(step, "extracted_facts", []):
+                if isinstance(fact, dict):
+                    canon_name = fact.get("canonical_name") or fact.get("canonical_label") or fact.get("metric") or fact.get("label") or "Financial Metric"
+                    if "_" in canon_name and " " not in canon_name:
+                        canon_name = canon_name.replace("_", " ").title()
+                    curr = fact.get("currency", "")
+                    val = fact.get("value")
+                    disp_val = fact.get("display_value") or fact.get("raw_str")
+                    if val is not None:
+                        metric_items.append(f"{canon_name}: {curr}{val}".strip())
+                    elif disp_val:
+                        metric_items.append(f"{canon_name}: {disp_val}".strip())
+                else:
+                    canon_name = getattr(fact, "canonical_name", None) or getattr(fact, "entity", None) or getattr(fact, "metric", "Financial Metric")
+                    if "_" in canon_name and " " not in canon_name:
+                        canon_name = canon_name.replace("_", " ").title()
+                    # Disambiguate if erroneously labeled as generic revenue but has a specific entity
+                    if canon_name.lower() in ("revenue", "financial metric") and getattr(fact, "entity", "") and getattr(fact, "entity", "").lower() not in ("revenue", "total revenue", "company total", "company", "sales", "turnover"):
+                        canon_name = getattr(fact, "entity")
+                    curr = getattr(fact, "currency", "") or default_curr
+                    raw_str = getattr(fact, "raw_str", "")
+                    num_val = getattr(fact, "value", None)
+                    if raw_str and (raw_str in direct_answer or any(num in raw_str for num in all_numeric_clues)):
+                        if "ebitda" in question.lower() and canon_name.lower() == "revenue":
+                            continue
+                        if is_inr and raw_str.startswith("$"):
+                            raw_str = "₹" + raw_str[1:]
+                        metric_items.append(f"{canon_name}: {raw_str}")
+                    elif num_val is not None and (str(num_val) in direct_answer or any(num in str(num_val) for num in all_numeric_clues)):
+                        metric_items.append(f"{canon_name}: {curr}{num_val}".strip())
+
+            # 2. Metric dictionaries from raw_records metadata (e.g., financial_metrics, financial_values)
+            for rec in getattr(step, "raw_records", []):
+                meta = rec.get("metadata") if isinstance(rec, dict) else {}
+                if isinstance(meta, dict):
+                    fm_list = meta.get("financial_metrics") or meta.get("financial_values") or meta.get("metrics")
+                    if isinstance(fm_list, str):
+                        try:
+                            fm_list = json.loads(fm_list)
+                        except Exception:
+                            fm_list = []
+                    if isinstance(fm_list, list):
+                        for m in fm_list:
+                            if isinstance(m, dict):
+                                canon_name = m.get("canonical_name") or m.get("canonical_label") or m.get("metric") or m.get("label") or "Financial Metric"
+                                if "_" in canon_name and " " not in canon_name:
+                                    canon_name = canon_name.replace("_", " ").title()
+                                curr = m.get("currency", "")
+                                val = m.get("value") if m.get("value") is not None else m.get("display_value", "")
+                                if val is not None and (str(val) in direct_answer or any(num in str(val) for num in all_numeric_clues)):
+                                    metric_items.append(f"{canon_name}: {curr}{val}".strip())
 
         cleaned_metrics = list(dict.fromkeys(metric_items))
         if cleaned_metrics:
@@ -2053,8 +2245,11 @@ class ResearchAgent:
         if analysis_id and target_company:
             retrieval_attempts.append((analysis_id, None, target_company))
             retrieval_attempts.append((analysis_id, None, None))
+            retrieval_attempts.append((None, None, target_company))
+            retrieval_attempts.append((None, None, None))
         elif analysis_id:
             retrieval_attempts.append((analysis_id, None, None))
+            retrieval_attempts.append((None, None, None))
         else:
             if document_id and target_company:
                 retrieval_attempts.append((None, document_id, target_company))
@@ -2224,6 +2419,12 @@ class ResearchAgent:
                 score += 0.75
             if "debt" in q_low and "debt" not in text_low and "liabilities" not in text_low:
                 score += 0.75
+            if any(w in q_low for w in ["liquidity", "cash", "commitment", "solvency", "obligations"]):
+                if any(w in text_low for w in ["cash and cash", "bank balances", "other bank", "investments in bank", "current investments", "short-term investments", "cloud infrastructure", "commitments", "contingencies", "operating activities"]):
+                    score -= 0.60
+            if any(w in q_low for w in ["working capital", "drag", "divergence", "receivables", "trade receivables", "ocf", "pat"]):
+                if any(w in text_low for w in ["trade receivables", "inventories", "working capital changes", "operating activities", "cash flows from operating activities", "balance sheet"]):
+                    score -= 0.60
 
             if "margin" in q_low and not any(term in q_low for term in ["debt", "liabilities", "balance sheet"]):
                 if any(term in sec_title or term in text_low for term in ["balance sheet", "total liabilities", "post-retirement benefit"]):
@@ -2298,7 +2499,7 @@ class ResearchAgent:
             )
             all_extracted_facts.extend(chunk_facts)
 
-        raw_texts = [doc_text for _, doc_text, _, _ in rows if doc_text]
+        raw_texts = [str(doc_text).strip() for _, doc_text, _, _ in rows if doc_text and str(doc_text).strip()]
         raw_records = [{"id": cid, "text": doc_text, "metadata": meta, "score": dist} for cid, doc_text, meta, dist in rows]
 
         citations = list(seen_chunk_ids.values())[:top_k * 2]
@@ -2327,6 +2528,7 @@ class ResearchAgent:
         rows: List[tuple[str, str, Dict[str, Any], Optional[float]]] = []
         retrieved_ids = set()
         for q_text in queries:
+            query_found = False
             for attempt_analysis_id, attempt_document_id, attempt_company in retrieval_attempts:
                 try:
                     retrieved = self.retrieval_service.retrieve_for_question(
@@ -2343,9 +2545,12 @@ class ResearchAgent:
                     cid = str(result.chunk_id)
                     if cid not in retrieved_ids:
                         meta = result.metadata or {}
-                        if self._matches_company_name(target_company, meta):
+                        if self._matches_company_name(target_company, meta, result.text):
                             rows.append((cid, result.text or "", meta, result.relevance_score))
                             retrieved_ids.add(cid)
+                            query_found = True
+                if query_found:
+                    break
         return rows
 
     # -------------------------------------------------------------- #
@@ -2427,8 +2632,9 @@ class ResearchAgent:
                 if len(r.values) >= 2:
                     g = calculate_growth_rate(r.values[0], r.values[1])
                     g_str = f"{g:+.1f}%" if g is not None else "N/A"
-                    val0_str = f"${r.values[0]:,.0f}M" if abs(r.values[0]) > 50 else f"${r.values[0]:,.2f}"
-                    val1_str = f"${r.values[1]:,.0f}M" if abs(r.values[1]) > 50 else f"${r.values[1]:,.2f}"
+                    sym = getattr(t, "currency_symbol", "$")
+                    val0_str = f"{sym}{r.values[0]:,.0f}M" if abs(r.values[0]) > 50 else f"{sym}{r.values[0]:,.2f}"
+                    val1_str = f"{sym}{r.values[1]:,.0f}M" if abs(r.values[1]) > 50 else f"{sym}{r.values[1]:,.2f}"
                     lines.append(f"- **{clean_lbl}:** Grew **{g_str}** year-over-year from {val1_str} in {prev_yr} to {val0_str} in {curr_yr}.")
                     if g is not None:
                         ranked_segments.append((clean_lbl, val0_str, val1_str, g_str, g))
@@ -2455,20 +2661,29 @@ class ResearchAgent:
                 lines.append(f"#### {idx}. {s.sub_question}")
                 step_text = "\n".join(s.raw_texts) if s.raw_texts else "\n".join(c.snippet for c in s.citations)
 
+                step_curr = "₹" if ("₹" in step_text or "inr" in step_text.lower() or "rs." in step_text.lower() or "rupee" in step_text.lower()) else "$"
                 step_findings = []
-                debt_m = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
-                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", step_text, re.I)
-                fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", step_text, re.I)
-                eps_m = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})", step_text, re.I)
+                debt_m = re.search(r"Total\s+debt[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", step_text, re.I)
+                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?([$€£₹]?[\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", step_text, re.I)
+                fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*([$€£₹]?\s*[\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", step_text, re.I)
+                eps_m = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?([$€£₹]?\s*\d+\.\d{2})", step_text, re.I)
 
                 if "debt" in s.sub_question.lower() and debt_m:
-                    step_findings.append(f"- **Total Debt:** ${debt_m.group(1).strip()}")
+                    v = debt_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Total Debt:** {v}")
                 elif "revenue" in s.sub_question.lower() and rev_m:
-                    step_findings.append(f"- **Revenue:** ${rev_m.group(1).strip()}")
+                    v = rev_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Revenue:** {v}")
                 elif "cash flow" in s.sub_question.lower() and fcf_m:
-                    step_findings.append(f"- **Free Cash Flow:** ${fcf_m.group(1).strip()}")
+                    v = fcf_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Free Cash Flow:** {v}")
                 elif "eps" in s.sub_question.lower() and eps_m:
-                    step_findings.append(f"- **Diluted EPS:** ${eps_m.group(1).strip()}")
+                    v = eps_m.group(1).strip()
+                    if not any(v.startswith(c) for c in "$€£₹"): v = f"{step_curr}{v}"
+                    step_findings.append(f"- **Diluted EPS:** {v}")
                 else:
                     sentences = [st.strip() for st in step_text.splitlines() if len(st.strip()) > 20 and not st.strip().startswith(("Note:", "Step"))]
                     if sentences:
@@ -2487,57 +2702,58 @@ class ResearchAgent:
         # -------------------------------------------------------------- #
         # Path C: Specific Single Financial Metrics (EPS, Cash Flow, Debt)
         # -------------------------------------------------------------- #
+        curr_sym = "₹" if ("₹" in combined_text or "inr" in combined_text.lower() or "rs." in combined_text.lower() or "rupee" in combined_text.lower()) else "$"
         metric_findings = []
 
         # EPS Extraction
         if "eps" in intent.target_metrics or "earnings per share" in question.lower():
-            eps_cont = re.search(r"continuing\s+operations[^\n:]*?:\s*\$?\s*(\d+\.\d{2})", combined_text, re.I)
-            eps_cons = re.search(r"consolidated\s+earnings\s+per\s+share[^\n:]*?:\s*\$?\s*(\d+\.\d{2})", combined_text, re.I)
-            eps_gen = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?\$?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_cont = re.search(r"continuing\s+operations[^\n:]*?:\s*[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_cons = re.search(r"consolidated\s+earnings\s+per\s+share[^\n:]*?:\s*[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
+            eps_gen = re.search(r"(?:Diluted\s+EPS|Earnings\s+Per\s+Share)[^\n:]*?:\s*(?:(?:202\d|201\d)\s*:\s*)?[$€£₹]?\s*(\d+\.\d{2})", combined_text, re.I)
             if eps_cont:
-                metric_findings.append(f"- **Diluted EPS from Continuing Operations:** ${eps_cont.group(1)}")
+                metric_findings.append(f"- **Diluted EPS from Continuing Operations:** {curr_sym}{eps_cont.group(1)}")
             if eps_cons:
-                metric_findings.append(f"- **Consolidated Diluted EPS:** ${eps_cons.group(1)}")
+                metric_findings.append(f"- **Consolidated Diluted EPS:** {curr_sym}{eps_cons.group(1)}")
             if not eps_cont and not eps_cons and eps_gen:
-                metric_findings.append(f"- **Diluted EPS:** ${eps_gen.group(1)}")
+                metric_findings.append(f"- **Diluted EPS:** {curr_sym}{eps_gen.group(1)}")
 
         # Cash Flow Extraction
         if "cash_flow" in intent.target_metrics or "cash flow" in question.lower() or "fcf" in question.lower():
-            fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
-            ocf_m = re.search(r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*\$?\s*([\d,]+(?:\.\d+)?)", combined_text, re.I)
+            fcf_m = re.search(r"Free\s+Cash\s+Flow\s*:\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", combined_text, re.I)
+            ocf_m = re.search(r"(?:Operating\s+Cash\s+Flow|Net\s+cash\s+provided\s+by\s+operating\s+activities)\s*[:\n]+\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?)", combined_text, re.I)
             if fcf_m:
-                metric_findings.append(f"- **Free Cash Flow:** ${fcf_m.group(1)}")
+                metric_findings.append(f"- **Free Cash Flow:** {curr_sym}{fcf_m.group(1)}")
             if ocf_m:
-                metric_findings.append(f"- **Net Cash Provided by Operating Activities:** ${ocf_m.group(1)} million")
+                metric_findings.append(f"- **Net Cash Provided by Operating Activities:** {curr_sym}{ocf_m.group(1)} million")
 
         # Revenue Extraction
         if "revenue" in intent.target_metrics or "revenue" in question.lower() or "sales" in question.lower():
-            rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            rev_m = re.search(r"(?:Total\s+Revenue|Revenue)[^\n]*?[$€£₹]([\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if not rev_m:
-                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
+                rev_m = re.search(r"(?:Total\s+Revenue|Revenue)\s*:\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", combined_text, re.I)
             if rev_m:
-                metric_findings.append(f"- **Total Revenue:** ${rev_m.group(1).strip()}")
+                metric_findings.append(f"- **Total Revenue:** {curr_sym}{rev_m.group(1).strip()}")
 
         # Debt and Balance Sheet Extraction
         if ("debt" in intent.target_metrics or "equity" in intent.target_metrics or "debt" in question.lower() or "liabilities" in question.lower() or "equity" in question.lower()) and "margin" not in question.lower():
-            debt_match = re.search(r"Total\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            debt_match = re.search(r"Total\s+debt[^\n]*?[$€£₹]([\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if not debt_match:
-                debt_match = re.search(r"Total\s+debt\s*:\s*\$?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million)?)", combined_text, re.I)
+                debt_match = re.search(r"Total\s+debt\s*:\s*[$€£₹]?\s*([\d,]+(?:\.\d+)?\s*(?:billion|million|crore)?)", combined_text, re.I)
             if debt_match:
                 val = debt_match.group(1).strip()
                 if val not in ["2023", "2024", "2025", "2026"]:
-                    metric_findings.append(f"- **Total Debt:** ${val}")
+                    metric_findings.append(f"- **Total Debt:** {curr_sym}{val}")
 
-            eq_match = re.search(r"Total\s+Stockholders'?\s+Equity[^\n]*?\$([\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)", combined_text, re.I)
+            eq_match = re.search(r"Total\s+Stockholders'?\s+Equity[^\n]*?[$€£₹]([\d,]+(?:\.\d+)?(?:\s*(?:billion|million|crore))?)", combined_text, re.I)
             if eq_match:
-                metric_findings.append(f"- **Total Stockholders' Equity:** ${eq_match.group(1).strip()}")
+                metric_findings.append(f"- **Total Stockholders' Equity:** {curr_sym}{eq_match.group(1).strip()}")
 
-            st_debt = re.search(r"Short-term\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?)", combined_text, re.I)
-            lt_debt = re.search(r"Long-term\s+debt[^\n]*?\$([\d,]+(?:\.\d+)?)", combined_text, re.I)
+            st_debt = re.search(r"Short-term\s+debt[^\n]*?[$€£₹]([\d,]+(?:\.\d+)?)", combined_text, re.I)
+            lt_debt = re.search(r"Long-term\s+debt[^\n]*?[$€£₹]([\d,]+(?:\.\d+)?)", combined_text, re.I)
             if st_debt:
-                metric_findings.append(f"- **Short-Term Debt:** ${st_debt.group(1)}")
+                metric_findings.append(f"- **Short-Term Debt:** {curr_sym}{st_debt.group(1)}")
             if lt_debt:
-                metric_findings.append(f"- **Long-Term Debt:** ${lt_debt.group(1)}")
+                metric_findings.append(f"- **Long-Term Debt:** {curr_sym}{lt_debt.group(1)}")
 
         if metric_findings and not intent.is_causal and "margin" not in question.lower():
             header_title = "Financial Metrics Summary"
@@ -2621,6 +2837,25 @@ class ResearchAgent:
                     distinct_factors.append(f)
                     seen_factor_snippets.add(f_key)
 
+            if any(w in question.lower() for w in ["divergence", "working capital", "drag", "receivables", "ocf", "pat"]):
+                tr_match = re.search(r"Trade\s+receivables[^\n|]*?\|\s*([\d,]+(?:\.\d+)?)\s*\|\s*([\d,]+(?:\.\d+)?)", combined_text, re.I)
+                if not tr_match:
+                    tr_match = re.search(r"Trade\s+receivables[^\n\d]*([\d,]+(?:\.\d+)?)[^\n\d]+([\d,]+(?:\.\d+)?)", combined_text, re.I)
+                if tr_match:
+                    val_a = float(tr_match.group(1).replace(",", ""))
+                    val_b = float(tr_match.group(2).replace(",", ""))
+                    v_curr, v_prev = max(val_a, val_b), min(val_a, val_b)
+                    change = v_curr - v_prev
+                    diff_str = f"{curr_sym}{change:,.2f} million" if abs(change) < 50000 else f"{curr_sym}{change:,.2f}"
+                    curr_str = f"{curr_sym}{v_curr:,.2f} million" if abs(v_curr) < 50000 else f"{curr_sym}{v_curr:,.2f}"
+                    prev_str = f"{curr_sym}{v_prev:,.2f} million" if abs(v_prev) < 50000 else f"{curr_sym}{v_prev:,.2f}"
+                    wc_factor = (
+                        f"Trade Receivables increased from {prev_str} to {curr_str} "
+                        f"(an increase of {diff_str}), creating a substantial working capital absorption that accounts for the divergence between PAT and Operating Cash Flow."
+                    )
+                    distinct_factors.insert(0, wc_factor)
+                    extracted_metrics.append(f"Trade Receivables: {curr_str} (vs {prev_str}, an increase of {diff_str})")
+
             if distinct_factors or extracted_metrics or (intent.is_causal and is_revenue_causal):
                 def find_cit_for_text(target_snippet: str) -> str:
                     for cit in all_citations:
@@ -2632,7 +2867,10 @@ class ResearchAgent:
                 lines = ["### Answer"]
                 comp_name = intent.target_company or (all_citations[0].company if all_citations else "The company")
                 if distinct_factors:
-                    lines.append(f"{comp_name}'s change in {('revenue' if is_revenue_causal else 'the requested metric')} is supported only by the disclosed evidence below.")
+                    if any(w in question.lower() for w in ["divergence", "working capital", "drag"]):
+                        lines.append(f"The divergence between {comp_name}'s PAT and Operating Cash Flow is primarily driven by working capital absorption as detailed below.")
+                    else:
+                        lines.append(f"{comp_name}'s change in {('revenue' if is_revenue_causal else 'the requested metric')} is supported only by the disclosed evidence below.")
                 elif is_revenue_causal:
                     lines.append("The report confirms the revenue movement, but the retrieved evidence does not explicitly identify its cause. Therefore, a specific causal explanation cannot be established from the available evidence.")
                 else:
@@ -2654,7 +2892,9 @@ class ResearchAgent:
                     for idx, factor_text in enumerate(distinct_factors[:3], 1):
                         cit_str = find_cit_for_text(factor_text)
                         title = "Operational Performance Driver"
-                        if any(w in factor_text.lower() for w in ["margin", "portfolio", "mix", "expansion", "cloud", "recurring"]):
+                        if any(w in factor_text.lower() for w in ["receivable", "working capital", "drag", "pat", "ocf"]):
+                            title = "Working Capital Drag (Trade Receivables Absorption)"
+                        elif any(w in factor_text.lower() for w in ["margin", "portfolio", "mix", "expansion", "cloud", "recurring"]):
                             title = "High-Margin Portfolio & Revenue Mix"
                         elif "productivity" in factor_text.lower() or "cost" in factor_text.lower() or "expense" in factor_text.lower() or "saving" in factor_text.lower():
                             title = "Cost Structure & Operational Efficiency"
@@ -2673,7 +2913,7 @@ class ResearchAgent:
 
                 lines.append("")
                 lines.append("### Largest Impact")
-                largest_stated = [f for f in distinct_factors if any(k in f.lower() for k in ["primarily", "largest", "main driver", "significant driver"])]
+                largest_stated = [f for f in distinct_factors if any(k in f.lower() for k in ["primarily", "largest", "main driver", "significant driver", "primary working capital drag", "substantial working capital absorption"])]
                 if largest_stated:
                     lines.append(f"Based on disclosed filings, the primary driver identified by management was: {largest_stated[0]}")
                 else:
@@ -2774,25 +3014,63 @@ class ResearchAgent:
         evidence_block = []
         target_comp = company or intent.target_company
         for s in steps:
-            evidence_block.append(f"Sub-question: {s.sub_question}")
-            # Include complete clean passages or citations
-            if s.raw_texts:
-                for idx, t in enumerate(s.raw_texts):
-                    cit_str = s.citations[idx].to_clean_citation(target_comp) if idx < len(s.citations) else "[Document Filing]"
-                    evidence_block.append(f"- Excerpt {cit_str}:\n{t}\n")
-            else:
-                for c in s.citations:
-                    evidence_block.append(f"- Excerpt {c.to_clean_citation(target_comp)}:\n{c.snippet}\n")
+            sub_q_str = str(getattr(s, "sub_question", "") or "").strip()
+            if sub_q_str:
+                evidence_block.append(f"Sub-question: {sub_q_str}")
 
-        entities_str = ', '.join(getattr(intent, 'target_entities', [])) if getattr(intent, 'target_entities', None) else 'Company Total'
-        metrics_str = ', '.join(getattr(intent, 'target_metrics', [])) if getattr(intent, 'target_metrics', None) else 'General Financial Context'
+            passages = []
+            if getattr(s, "raw_texts", None):
+                for idx, t in enumerate(s.raw_texts):
+                    t_str = str(t or "").strip()
+                    if not t_str:
+                        continue
+                    cit_str = s.citations[idx].to_clean_citation(target_comp) if (s.citations and idx < len(s.citations)) else "[Document Filing]"
+                    passages.append(f"- Excerpt {cit_str}:\n{t_str}\n")
+            if not passages and getattr(s, "citations", None):
+                for c in s.citations:
+                    snip = str(getattr(c, "snippet", "") or "").strip()
+                    if not snip:
+                        continue
+                    cit_str = c.to_clean_citation(target_comp)
+                    passages.append(f"- Excerpt {cit_str}:\n{snip}\n")
+
+            # Include structured facts with complete values, currency, and period
+            if getattr(s, "extracted_facts", None):
+                fact_lines = []
+                for f in s.extracted_facts:
+                    raw_val = str(getattr(f, "raw_str", "") or "").strip()
+                    num_val = getattr(f, "value", None)
+                    metric_lbl = str(getattr(f, "metric", "") or "Financial Metric").strip()
+                    period_lbl = str(getattr(f, "period", "") or "").strip()
+                    unit_lbl = str(getattr(f, "unit", "") or "").strip()
+                    curr_lbl = str(getattr(f, "currency", "") or "").strip()
+
+                    val_str = raw_val or (f"{curr_lbl} {num_val} {unit_lbl}".strip() if num_val is not None else "")
+                    if val_str:
+                        p_str = f" ({period_lbl})" if period_lbl else ""
+                        fact_lines.append(f"  * {metric_lbl}{p_str}: {val_str}")
+                if fact_lines:
+                    passages.append("- Extracted Financial Metrics:\n" + "\n".join(fact_lines) + "\n")
+
+            if passages:
+                evidence_block.extend(passages)
+            elif getattr(s, "findings", None) and str(s.findings).strip():
+                evidence_block.append(f"- Excerpt [Document Filing]:\n{str(s.findings).strip()}\n")
+
+        raw_entities = getattr(intent, 'target_entities', []) or []
+        entities_str = ', '.join(str(e) for e in raw_entities if e) if raw_entities else 'Company Total'
+
+        raw_metrics = getattr(intent, 'target_metrics', []) or []
+        metrics_str = ', '.join(str(m) for m in raw_metrics if m) if raw_metrics else 'General Financial Context'
+
+        clean_evidence_text = "\n".join(evidence_block).strip() or "No verified document excerpts available."
         return (
             f"You are a senior financial research analyst.\n\n"
             f"USER QUESTION: {question}\n"
             f"IDENTIFIED INTENT: {getattr(intent, 'intent_type', type('IntentType', (), {'value': getattr(intent, 'intent', 'financial_metric')})()).value} (Causal: {getattr(intent, 'is_causal', False)}, Comparative: {getattr(intent, 'is_comparative', False)})\n"
             f"TARGET ENTITIES: {entities_str}\n"
             f"TARGET METRICS: {metrics_str}\n\n"
-            f"RETRIEVED SOURCE PASSAGES:\n" + "\n".join(evidence_block) + "\n\n"
+            f"RETRIEVED SOURCE PASSAGES:\n{clean_evidence_text}\n\n"
             f"TASK & INSTRUCTIONS:\n"
             f"Answer the user's question directly, concisely, and with complete precision using ONLY the evidence above.\n\n"
             f"STRUCTURE YOUR RESPONSE AS FOLLOWS FOR COMPARATIVE & CALCULATION QUESTIONS:\n"

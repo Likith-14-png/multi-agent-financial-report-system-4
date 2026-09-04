@@ -19,6 +19,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
+EXTRACTION_SYSTEM_PROMPT = """You are a Principal Financial Auditor. Extract metrics into strict JSON.
+CRITICAL CONSTRAINTS:
+1. DEFINITION PURITY: "Revenue" strictly means Top-Line Turnover. NEVER extract Profit, PAT, or Net Income as Revenue. "Total Equity" must be attributable to parent owners; NEVER substitute "Other Equity".
+2. UNIT LOCALITY: Inherit currency and scale (crore, million) directly from the immediate table header. Never let global document units override local table units. Format: "₹[Value] [Unit]".
+3. ABSTENTION: If missing, return null. NEVER substitute asset lifespans or net book values.
+4. PAGE NUMBER COLLISION: NEVER extract numbers from "Source Page", "Page", or citation columns as financial values.
+"""
 
 # ---------------------------------------------------------------------------
 # 1. Metric Synonym & Classification Taxonomy
@@ -227,12 +234,13 @@ METRIC_TAXONOMY: Dict[str, Dict[str, Any]] = {
     "total_equity": {
         "canonical_name": "Total Equity",
         "aliases": [
+            r"\btotal equity attributable to (?:the )?owners\b",
             r"\btotal equity\b",
             r"\btotal stockholders'? equity\b",
             r"\btotal shareholders'? equity\b",
             r"\bstockholders'? equity\b",
             r"\bshareholders'? equity\b",
-            r"\bequity\b",
+            r"(?<!other\s)(?<!share\s)\bequity(?!\s+share)(?!\s+shares)\b",
         ],
         "category": "balance_sheet",
         "is_per_share": False,
@@ -410,6 +418,14 @@ def _is_temporal_year_label(text: str) -> bool:
 def extract_table_header_units(text: str) -> Tuple[Optional[str], Optional[str]]:
     if not text:
         return None, None
+    statutory_rupee_patterns = [
+        r"(?i)\(\s*(?:all\s+)?amounts\s+(?:are\s+)?in\s+(?:indian\s+rupees?|inr|rs\.?)\s*(?:in\s+)?(thousands?|millions?|billions?|crores?|lakhs?)\b.*?\)",
+        r"(?i)\b(?:all\s+)?amounts\s+in\s+(?:indian\s+rupees?|inr|rs\.?)\s*(?:in\s+)?(thousands?|millions?|billions?|crores?|lakhs?)\b",
+    ]
+    for pat in statutory_rupee_patterns:
+        m = re.search(pat, text)
+        if m:
+            return "INR", _normalize_unit_name(m.group(1))
     extracted_rupee_header = re.search(
         r"(?im)(?:\(\s*(?:in\s+)?|\b(?:all\s+(?:amounts|figures|values)\s+are\s+in|"
         r"(?:primary|reporting)\s+unit\s*[:=\-]?|unit(?:\s+of\s+measure)?\s*[:=\-]?)\s*)I\s+"
@@ -510,6 +526,27 @@ def _normalize_unit_name(unit: Optional[str]) -> Optional[str]:
         "k": "thousand",
     }
     return aliases.get(norm)
+
+
+def _normalize_currency_name(curr: Optional[str]) -> Optional[str]:
+    if curr is None:
+        return None
+    c = re.sub(r"\s+", " ", str(curr)).strip().lower().replace(".", "")
+    if c in ("inr", "rs", "rupee", "rupees", "indian rupee", "indian rupees", "₹"):
+        return "INR"
+    if c in ("usd", "us$", "$", "dollar", "dollars", "us dollar", "us dollars"):
+        return "USD"
+    if c in ("eur", "€", "euro", "euros"):
+        return "EUR"
+    if c in ("gbp", "£", "pound", "pounds"):
+        return "GBP"
+    if c in ("jpy", "¥", "yen"):
+        return "JPY"
+    if c in ("cny", "cn¥", "yuan"):
+        return "CNY"
+    if c in ("chf",):
+        return "CHF"
+    return curr.upper()
 
 
 def _detect_context_currency_and_unit(
@@ -626,9 +663,18 @@ def _detect_document_currency_unit(text: str) -> Tuple[Optional[str], Optional[s
     if not text:
         return None, None
     normalized = re.sub(r"[ \t]+", " ", text)
+    statutory_match = re.search(
+        r"(?i)\(\s*(?:all\s+)?amounts\s+(?:are\s+)?in\s+(?:indian\s+rupees?|inr|rs\.?)\s*(?:in\s+)?(thousands?|millions?|billions?|crores?|lakhs?)\b.*?\)",
+        normalized,
+    ) or re.search(
+        r"(?i)\b(?:all\s+)?amounts\s+in\s+(?:indian\s+rupees?|inr|rs\.?)\s*(?:in\s+)?(thousands?|millions?|billions?|crores?|lakhs?)\b",
+        normalized,
+    )
+    if statutory_match:
+        return "INR", _normalize_unit_name(statutory_match.group(1))
     currency_match = re.search(
         r"(?i)\b(?:currency|reporting currency|presentation currency)\s*[:=\-]?\s*"
-        r"(INR|USD|EUR|GBP|JPY|CNY|CHF)\b",
+        r"(INR|USD|EUR|GBP|JPY|CNY|CHF|indian\s+rupees?|rs\.?)\b",
         normalized,
     )
     unit_match = re.search(
@@ -637,7 +683,7 @@ def _detect_document_currency_unit(text: str) -> Tuple[Optional[str], Optional[s
         normalized,
     )
     return (
-        currency_match.group(1).upper() if currency_match else None,
+        _normalize_currency_name(currency_match.group(1)) if currency_match else None,
         _normalize_unit_name(unit_match.group(1)) if unit_match else None,
     )
 
@@ -1087,14 +1133,33 @@ def _classify_metric_candidate(
         return None
     if not _is_semantically_compatible_metric(metric_key, sentence, parsed):
         return None
-    if metric_key == "revenue" and re.search(r"\bcost\s+of\s+(?:revenue|sales|goods sold)\b", lowered):
+    if re.search(r"\b(?:extracted\s+from\s+pages?|source\s+references?)\b", lowered):
         return None
-    if metric_key == "total_equity" and re.search(r"\bdebt\s*[- ]?to\s*[- ]?equity\b|\bequity\s+ratio\b", lowered):
+    if metric_key in ("total_equity", "total_liabilities"):
+        if re.search(r"\b(?:equity\s+and\s+liabilities|liabilities\s+and\s+equity)\b", lowered):
+            return None
+    if metric_key == "total_equity" and re.search(r"\b(?:other\s+equity|equity\s+share\s+capital|share\s+capital|equity\s+shares?|transaction\s+costs?|share\s+issue\s+costs?|cost\s+of\s+equity|debt\s*[- ]?to\s*[- ]?equity|\bequity\s+ratio)\b", lowered):
         return None
-    if metric_key == "revenue" and re.search(r"\b(?:segment|division|services?|business line|geographic|regional)\b", lowered) and "consolidated" not in lowered:
-        return "segment_revenue"
+    if metric_key == "revenue":
+        if re.search(r"\bcost\s+of\s+(?:revenue|sales|goods sold)\b", lowered):
+            return None
+        if re.search(r"\b(?:profit\s+after\s+tax|\bpat\b|net\s+income|\btaxes?\b|provision\s+for\s+tax)\b", lowered):
+            raw_val = str(parsed.get("raw_value") or "")
+            raw_clean = re.sub(r"[^\d.]", "", raw_val)
+            if raw_clean and raw_clean in lowered:
+                val_idx = lowered.find(raw_clean)
+                surrounding = lowered[max(0, val_idx - 60):min(len(lowered), val_idx + len(raw_clean) + 60)]
+                if re.search(r"\b(?:profit\s+after\s+tax|\bpat\b|net\s+income|\btaxes?\b)", surrounding):
+                    return None
+            elif not re.search(r"\b(?:revenue\s+from\s+operations|total\s+revenue)\b", lowered):
+                return None
+    if metric_key == "revenue" and re.search(r"\b(?:segment|division|services?|business line|geographic|regional)\b", lowered):
+        if re.search(r"\bsegment\b", lowered) or "consolidated" not in lowered:
+            return "segment_revenue"
     if metric_key == "operating_cash_flow":
         if re.search(r"\b(?:free|investing|financing)\s+cash flow\b", lowered):
+            return None
+        if re.search(r"\b(?:working\s+capital|adjustments?|before\s+working\s+capital)\b", lowered):
             return None
         if "operating" not in lowered and "cash from operations" not in lowered and "cash flow from operations" not in lowered:
             return None
@@ -1312,6 +1377,123 @@ def _find_grounded_chunk_for_observation(
 # 5. Context-Driven Canonical Selection Hierarchy
 # ---------------------------------------------------------------------------
 
+def _candidate_precision(cand: Dict[str, Any]) -> Tuple[int, int]:
+    """Calculate candidate numeric precision: (decimal_places, total_digits).
+    
+    Tie-breaker: prefer 15,056.06 (2 decimal places, 7 total digits) over 1505.6 (1 decimal place, 5 total digits).
+    """
+    raw = str(cand.get("raw_value") or cand.get("value") or cand.get("exact_evidence") or "").strip()
+    m = re.search(r"[-+]?\d[\d,]*(?:\.(\d+))?", raw)
+    if m:
+        dec_places = len(m.group(1)) if m.group(1) is not None else 0
+        total_digits = len(re.sub(r"\D", "", m.group(0)))
+        return (dec_places, total_digits)
+    n_val = cand.get("numeric_value")
+    if n_val is not None:
+        s = f"{n_val:.4f}".rstrip("0").rstrip(".")
+        dec_places = len(s.split(".")[1]) if "." in s else 0
+        total_digits = len(s.replace(".", "").replace("-", ""))
+        return (dec_places, total_digits)
+    return (0, 0)
+
+
+def _score_candidate(cand: Dict[str, Any], target_year: Optional[int] = None) -> float:
+    """Weighted scoring function for canonical observation selection:
+    - Source Section Priority (+50 pts for primary statements, -20 pts for narrative/summary)
+    - Table Over Text (+30 pts for structured tables)
+    - Target Year Exact Match (+100 pts for target year, -100 pts for historical/comparative mismatch)
+    """
+    context = " ".join(
+        str(cand.get(key) or "")
+        for key in ("statement_context", "source_section", "section", "source_type", "exact_evidence")
+    ).casefold().replace("_", " ")
+    
+    reference_terms = (
+        "expected cross-document", "expected comparison", "test values",
+        "reference", "illustrative example", "comparison example", "expected results",
+    )
+    if any(term in context for term in reference_terms):
+        return float("-inf")
+
+    score = 0.0
+
+    # 1. Source Section Priority (+50 pts)
+    sec_raw = str(cand.get("source_section") or cand.get("section_type") or cand.get("section") or "").lower().strip()
+    sec_norm = sec_raw.replace("-", "_").replace(" ", "_")
+    stmt_ctx = str(cand.get("statement_context") or "").lower().strip().replace("-", "_").replace(" ", "_")
+
+    is_primary_section = False
+    if cand.get("source_section") in ['income_statement', 'balance_sheet', 'cash_flow_statement']:
+        is_primary_section = True
+    elif any(ps in sec_norm for ps in (
+        "income_statement", "balance_sheet", "cash_flow", "statement_of_profit",
+        "statement_of_loss", "profit_and_loss", "statement_of_financial_position",
+        "statement_of_cash_flows", "financial_statements",
+    )):
+        is_primary_section = True
+    elif any(ps in stmt_ctx for ps in (
+        "income_statement", "balance_sheet", "cash_flow", "statement_of_profit",
+        "statement_of_loss", "profit_and_loss", "statement_of_financial_position",
+        "statement_of_cash_flows", "financial_statements",
+    )):
+        is_primary_section = True
+
+    is_narrative = any(term in sec_raw or term in stmt_ctx for term in (
+        "narrative", "executive_summary", "overview", "highlights", "commentary", "management_discussion",
+        "cover", "company_information", "cover_and_company_information"
+    ))
+
+    is_primary_section = False
+    if cand.get("source_section") in ['income_statement', 'balance_sheet', 'cash_flow_statement']:
+        is_primary_section = True
+    elif any(ps in sec_norm for ps in (
+        "income_statement", "balance_sheet", "cash_flow", "statement_of_profit",
+        "statement_of_loss", "profit_and_loss", "statement_of_financial_position",
+        "statement_of_cash_flows", "financial_statements",
+    )):
+        is_primary_section = True
+    elif not is_narrative and any(ps in stmt_ctx for ps in (
+        "income_statement", "balance_sheet", "cash_flow", "statement_of_profit",
+        "statement_of_loss", "profit_and_loss", "statement_of_financial_position",
+        "statement_of_cash_flows", "financial_statements",
+    )):
+        is_primary_section = True
+
+    if is_primary_section and not is_narrative:
+        score += 50.0
+    elif is_narrative:
+        score -= 20.0
+
+    # Penalize partial equity matches when selecting Total Equity
+    metric_name = str(cand.get("metric_name") or "").lower()
+    if metric_name == "total_equity":
+        evidence_str = str(cand.get("exact_evidence") or cand.get("raw_value") or cand.get("canonical_label") or "").lower()
+        if any(term in evidence_str for term in ("other equity", "equity share capital", "share capital", "equity shares", "instrument entirely equity")):
+            score -= 80.0
+
+    # 2. Table Over Text (+30 pts)
+    is_table = bool(
+        cand.get("is_table") is True
+        or cand.get("is_financial_table") is True
+        or cand.get("source_type") == "table"
+        or (isinstance(cand.get("exact_evidence"), str) and "|" in cand.get("exact_evidence"))
+    )
+    if is_table:
+        score += 30.0
+
+    # 3. Target Year Exact Match (+100 pts / -100 pts)
+    if target_year is not None:
+        cand_year = _normalize_year_value(cand.get("year") or cand.get("report_year"))
+        norm_target = _normalize_year_value(target_year)
+        if cand_year is not None and norm_target is not None:
+            if cand_year == norm_target:
+                score += 100.0
+            else:
+                score -= 100.0
+
+    return score
+
+
 def _provenance_score(observation: Dict[str, Any], target_year: Optional[int] = None) -> float:
     """Score semantic source quality; page order is intentionally not primary."""
     context = " ".join(
@@ -1334,7 +1516,10 @@ def _provenance_score(observation: Dict[str, Any], target_year: Optional[int] = 
         "income statement", "statement of profit", "statement of loss",
         "balance sheet", "statement of financial position", "cash flow statement",
         "statement of cash flows", "financial statements",
-    )) or "income statement audited" in statement_context:
+    )) or any(ps in statement_context for ps in (
+        "income_statement", "income statement", "balance_sheet", "balance sheet",
+        "cash_flow", "statement_of_profit", "statement_of_loss"
+    )):
         score = 100.0
     elif "income statement consolidated" in statement_context:
         score = 80.0
@@ -1359,6 +1544,7 @@ def _provenance_score(observation: Dict[str, Any], target_year: Optional[int] = 
         score += 5.0
     return score
 
+
 def select_canonical_observation(
     observations: List[Dict[str, Any]],
     target_metric: str,
@@ -1371,27 +1557,37 @@ def select_canonical_observation(
     if requested_context:
         req_lower = requested_context.lower()
         if "standalone" in req_lower:
-            standalone_cands = [c for c in candidates if "standalone" in c.get("statement_context", "").lower()]
+            standalone_cands = [c for c in candidates if "standalone" in str(c.get("statement_context", "")).lower()]
             if standalone_cands:
                 candidates = standalone_cands
         elif "segment" in req_lower:
-            segment_cands = [c for c in candidates if "segment" in c.get("statement_context", "").lower()]
+            segment_cands = [c for c in candidates if "segment" in str(c.get("statement_context", "")).lower()]
             if segment_cands:
                 candidates = segment_cands
         elif "consolidated" in req_lower:
-            consol_cands = [c for c in candidates if "consolidated" in c.get("statement_context", "").lower() or "audited" in c.get("statement_context", "").lower()]
+            consol_cands = [c for c in candidates if "consolidated" in str(c.get("statement_context", "")).lower() or "audited" in str(c.get("statement_context", "")).lower()]
             if consol_cands:
                 candidates = consol_cands
+
     if target_year:
-        year_matched = [c for c in candidates if c.get("report_year") == target_year]
-        if not year_matched:
+        norm_target = _normalize_year_value(target_year)
+        year_matched = [c for c in candidates if _normalize_year_value(c.get("year") or c.get("report_year")) == norm_target]
+        if year_matched:
+            candidates = year_matched
+        else:
             return None
-        candidates = year_matched
+
     def _rank_candidate(cand: Dict[str, Any]) -> tuple:
+        cand_score = _score_candidate(cand, target_year=target_year)
+        dec_places, total_digits = _candidate_precision(cand)
+        prov_score = _provenance_score(cand, target_year=target_year)
         page = _normalize_year_value(cand.get("source_page"))
         chunk_index = _normalize_year_value(cand.get("chunk_index"))
         return (
-            _provenance_score(cand, target_year=target_year),
+            cand_score,
+            dec_places,
+            total_digits,
+            prov_score,
             1 if cand.get("canonical_label") else 0,
             1 if cand.get("source_chunk_id") else 0,
             -(page if page is not None else 10**9),
@@ -1415,15 +1611,190 @@ def _extract_multi_year_financial_tables(
     if not text:
         return yearly, observations
     detected_curr, detected_unit = extract_table_header_units(text)
-    resolved_context = resolve_currency_unit_context(
-        table_context={"currency": detected_curr, "unit": detected_unit},
-        document_context=document_context,
-    )
+    if detected_curr or detected_unit:
+        resolved_context = resolve_currency_unit_context(
+            table_context={"currency": detected_curr, "unit": detected_unit},
+            document_context={"currency": detected_curr, "unit": detected_unit},
+        )
+    else:
+        resolved_context = resolve_currency_unit_context(
+            table_context={"currency": detected_curr, "unit": detected_unit},
+            document_context=document_context,
+        )
     detected_curr = resolved_context["currency"] if resolved_context["currency"] != "UNKNOWN" else None
     detected_unit = resolved_context["unit"] if resolved_context["unit"] != "units" else None
     curr_prefix = "₹" if detected_curr == "INR" else ("$" if detected_curr == "USD" else ("€" if detected_curr == "EUR" else ""))
     table_unit = detected_unit or "units"
     table_curr = detected_curr or "UNKNOWN"
+
+    # Layout-Aware GFM Markdown Table Multi-Year & Metric Extraction
+    text_lines = text.splitlines()
+    line_idx = 0
+    while line_idx < len(text_lines):
+        t_line = text_lines[line_idx].strip()
+        if t_line.startswith("|") and t_line.endswith("|") and not t_line.startswith("| :---"):
+            header_cells = [c.strip() for c in t_line.split("|")[1:-1]]
+
+            # Pattern A: Multi-year horizontal column table (e.g. | Division | FY24 | FY25 | FY26 |)
+            year_cols: List[Tuple[int, int]] = []
+            for col_idx, cell in enumerate(header_cells[1:], 1):
+                m4 = re.search(r"\b(20\d{2}|19\d{2})\b", cell)
+                if m4:
+                    year_cols.append((col_idx, int(m4.group(1))))
+                else:
+                    mfy = re.search(r"\bFY\s*'?(\d{2})\b", cell, re.I)
+                    if mfy:
+                        year_cols.append((col_idx, 2000 + int(mfy.group(1))))
+
+            if len(year_cols) >= 2 and line_idx + 1 < len(text_lines) and text_lines[line_idx + 1].strip().startswith("| :---"):
+                preceding_context = "\n".join(text_lines[max(0, line_idx - 6):line_idx])
+                row_curr, row_unit = extract_table_header_units(preceding_context)
+                eff_curr = row_curr or table_curr
+                eff_unit = row_unit or table_unit
+                pfx = "₹" if eff_curr == "INR" else ("$" if eff_curr == "USD" else ("€" if eff_curr == "EUR" else ""))
+
+                r_idx = line_idx + 2
+                while r_idx < len(text_lines) and text_lines[r_idx].strip().startswith("|") and text_lines[r_idx].strip().endswith("|"):
+                    row_cells = [c.strip() for c in text_lines[r_idx].split("|")[1:-1]]
+                    if row_cells and len(row_cells) >= max(c[0] for c in year_cols) + 1:
+                        row_label = row_cells[0]
+                        matched_key = None
+                        matched_canonical = None
+                        if re.search(r"(?i)\b(?:Total\s+Revenue|Revenue\s+from\s+operations|Revenues?)\b", row_label):
+                            matched_key, matched_canonical = "revenue", "Revenue"
+                        elif re.search(r"(?i)\bGross\s+Profit\b", row_label):
+                            matched_key, matched_canonical = "gross_profit", "Gross Profit"
+                        elif re.search(r"(?i)\b(?:Operating\s+Income|Operating\s+Profit|EBIT)\b", row_label):
+                            matched_key, matched_canonical = "operating_income", "Operating Income"
+                        elif re.search(r"(?i)\b(?:Profit[/\s(]+loss[)\s]+before\s+tax|Income\s+before\s+tax(?:es)?)\b", row_label):
+                            matched_key, matched_canonical = "pretax_income", "Pre-tax Income"
+                        elif re.search(r"(?i)\b(?:Net\s+Income|Profit[/\s(]+loss[)\s]+for\s+the\s+year)\b", row_label):
+                            matched_key, matched_canonical = "net_income", "Net Income"
+                        elif re.search(r"(?i)\bTotal\s+assets\b", row_label):
+                            matched_key, matched_canonical = "total_assets", "Total Assets"
+                        elif re.search(r"(?i)\bTotal\s+equity\b", row_label) and not re.search(r"(?i)\b(?:other\s+equity|share\s+capital)\b", row_label):
+                            matched_key, matched_canonical = "total_equity", "Total Equity"
+                        elif re.search(r"(?i)\bTotal\s+liabilities\b", row_label):
+                            matched_key, matched_canonical = "total_liabilities", "Total Liabilities"
+                        elif re.search(r"(?i)\b(?:Cash\s+and\s+cash\s+equivalents|Cash\s+and\s+bank\s+balances)\b", row_label):
+                            matched_key, matched_canonical = "cash_and_equivalents", "Cash and Cash Equivalents"
+                        elif re.search(r"(?i)\b(?:Operating\s+cash\s+flow|Net\s+cash\s+(?:provided\s+by|generated\s+from)\s+operating\s+activities|Cash\s+generated\s+from\s+operations)\b", row_label):
+                            matched_key, matched_canonical = "operating_cash_flow", "Operating Cash Flow"
+                        elif re.search(r"(?i)\bBasic\s+(?:EPS|earnings\s+per\s+share)\b", row_label):
+                            matched_key, matched_canonical = "basic_eps", "Basic EPS"
+                        elif re.search(r"(?i)\bTotal\s+Software\b", row_label):
+                            matched_key, matched_canonical = "software_revenue", "Software Segment"
+                        elif re.search(r"(?i)\bTotal\s+Consulting\b", row_label):
+                            matched_key, matched_canonical = "consulting_revenue", "Consulting Segment"
+                        elif re.search(r"(?i)\bTotal\s+Infrastructure\b", row_label):
+                            matched_key, matched_canonical = "infrastructure_revenue", "Infrastructure Segment"
+
+                        if matched_key and matched_canonical:
+                            if matched_key in ("total_assets", "total_equity", "total_liabilities", "cash_and_equivalents"):
+                                sec_type = "balance_sheet"
+                            elif matched_key in ("operating_cash_flow", "cash_flow"):
+                                sec_type = "cash_flow_statement"
+                            else:
+                                sec_type = "income_statement"
+
+                            row_series = []
+                            for col_idx, yr in year_cols:
+                                raw_tok = row_cells[col_idx].replace(",", "")
+                                m_num = re.search(r"[-+]?\d+(?:\.\d+)?", raw_tok)
+                                if m_num:
+                                    n_val = float(m_num.group(0))
+                                    fmt_val = f"{pfx}{n_val:,.2f} {eff_unit}".replace(".00 ", " ").strip()
+                                    row_series.append({
+                                        "year": yr,
+                                        "value": fmt_val,
+                                        "numeric_value": n_val,
+                                        "unit": f"{eff_unit} {eff_curr}".strip(),
+                                    })
+                                    observations.append({
+                                        "metric_name": matched_key,
+                                        "canonical_label": matched_canonical,
+                                        "raw_value": fmt_val,
+                                        "numeric_value": n_val,
+                                        "currency": eff_curr,
+                                        "unit": eff_unit,
+                                        "statement_context": sec_type,
+                                        "source_section": sec_type,
+                                        "report_year": yr,
+                                        "year": yr,
+                                        "is_canonical": True,
+                                        "is_table": True,
+                                        "exact_evidence": text_lines[r_idx],
+                                    })
+                            if row_series and (matched_canonical not in yearly or len(row_series) > len(yearly[matched_canonical])):
+                                yearly[matched_canonical] = sorted(row_series, key=lambda x: x["year"])
+                    r_idx += 1
+                line_idx = r_idx
+                continue
+
+            # Pattern B: Explicit column summary table (| Metric Name | Year | Value | Unit | Source Page |)
+            if len(header_cells) >= 4 and any("metric" in h.lower() for h in header_cells) and any("value" in h.lower() for h in header_cells):
+                val_c_idx = next(idx for idx, h in enumerate(header_cells) if "value" in h.lower())
+                yr_c_idx = next((idx for idx, h in enumerate(header_cells) if "year" in h.lower()), None)
+                unit_c_idx = next((idx for idx, h in enumerate(header_cells) if "unit" in h.lower()), None)
+
+                r_idx = line_idx + 2
+                while r_idx < len(text_lines) and text_lines[r_idx].strip().startswith("|") and text_lines[r_idx].strip().endswith("|"):
+                    row_cells = [c.strip() for c in text_lines[r_idx].split("|")[1:-1]]
+                    if len(row_cells) > val_c_idx:
+                        m_name_cell = row_cells[0]
+                        v_cell = row_cells[val_c_idx]
+                        u_cell = row_cells[unit_c_idx] if unit_c_idx is not None and len(row_cells) > unit_c_idx else table_unit
+                        y_cell = row_cells[yr_c_idx] if yr_c_idx is not None and len(row_cells) > yr_c_idx else None
+
+                        y_val = int(y_cell) if y_cell and y_cell.isdigit() else 2026
+                        parsed_u = "million" if "million" in str(u_cell).lower() else ("crore" if "crore" in str(u_cell).lower() else table_unit)
+                        parsed_c = "INR" if "inr" in str(u_cell).lower() or "rupee" in str(u_cell).lower() else table_curr
+                        pfx_b = "₹" if parsed_c == "INR" else ""
+
+                        num_m = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", v_cell)
+                        if num_m:
+                            n_v = float(num_m.group(0).replace(",", ""))
+                            raw_fmt = f"{pfx_b}{v_cell} {parsed_u}".strip()
+
+                            target_m_key = None
+                            target_can = None
+                            if re.search(r"(?i)\b(?:Revenue\s+from\s+operations|Total\s+revenue)\b", m_name_cell):
+                                target_m_key, target_can = "revenue", "Revenue"
+                            elif re.search(r"(?i)\bProfit[/\s(]+loss[)\s]+for\b", m_name_cell):
+                                target_m_key, target_can = "net_income", "Net Income"
+                            elif re.search(r"(?i)\bProfit[/\s(]+loss[)\s]+before\b", m_name_cell):
+                                target_m_key, target_can = "pretax_income", "Pre-tax Income"
+                            elif re.search(r"(?i)\bTotal\s+assets\b", m_name_cell):
+                                target_m_key, target_can = "total_assets", "Total Assets"
+                            elif re.search(r"(?i)\bTotal\s+equity\b", m_name_cell):
+                                target_m_key, target_can = "total_equity", "Total Equity"
+                            elif re.search(r"(?i)\bCash\s+and\s+cash\s+equivalents\b", m_name_cell):
+                                target_m_key, target_can = "cash_and_equivalents", "Cash and Cash Equivalents"
+                            elif re.search(r"(?i)\bBasic\s+Earnings\s+per\s+share\b", m_name_cell):
+                                target_m_key, target_can = "basic_eps", "Basic EPS"
+
+                            if target_m_key:
+                                observations.append({
+                                    "metric_name": target_m_key,
+                                    "canonical_label": target_can,
+                                    "raw_value": raw_fmt,
+                                    "numeric_value": n_v,
+                                    "currency": parsed_c,
+                                    "unit": parsed_u,
+                                    "statement_context": "consolidated_financial_metrics",
+                                    "source_section": "consolidated_financial_metrics",
+                                    "report_year": y_val,
+                                    "year": y_val,
+                                    "is_canonical": True,
+                                    "is_table": True,
+                                    "exact_evidence": text_lines[r_idx],
+                                })
+                    r_idx += 1
+                line_idx = r_idx
+                continue
+
+        line_idx += 1
+
     table_metric_patterns = [
         ("revenue", "Revenue", r"(?:Total\s+revenue|Revenues?|Revenue\s+from\s+operations)\s*\n+\s*([\d,]+(?:\.\d+)?)\s*\n+\s*([\d,]+(?:\.\d+)?)\s*\n+\s*([\d,]+(?:\.\d+)?)"),
         ("gross_profit", "Gross Profit", r"Gross\s+profit\s*\n+\s*([\d,]+(?:\.\d+)?)\s*\n+\s*([\d,]+(?:\.\d+)?)\s*\n+\s*([\d,]+(?:\.\d+)?)"),
@@ -1439,35 +1810,71 @@ def _extract_multi_year_financial_tables(
     for m_key, canonical_label, pattern in table_metric_patterns:
         match = _find_non_reference_match(pattern, text, re.I)
         if match:
-            preceding = text[max(0, match.start() - 400):match.start()]
+            preceding = text[max(0, match.start() - 500):match.start()]
             row_curr, row_unit = extract_table_header_units(preceding)
             effective_curr = row_curr or table_curr
             effective_unit = row_unit or table_unit
             pfx = "₹" if effective_curr == "INR" else ("$" if effective_curr == "USD" else ("€" if effective_curr == "EUR" else ""))
-            v25_raw = match.group(1).replace(",", "")
-            v24_raw = match.group(2).replace(",", "")
-            v23_raw = match.group(3).replace(",", "")
-            v25_val = f"{pfx}{match.group(1)} {effective_unit}".strip()
-            v24_val = f"{pfx}{match.group(2)} {effective_unit}".strip()
-            v23_val = f"{pfx}{match.group(3)} {effective_unit}".strip()
+
+            # Dynamically extract table column years from preceding header row
+            header_years: List[int] = []
+            for h_line in reversed(preceding.splitlines()):
+                y_matches = [int(y) for y in re.findall(r"\b(20\d{2}|19\d{2})\b", h_line)]
+                if len(y_matches) >= 2:
+                    header_years = y_matches
+                    break
+            if not header_years:
+                all_y = [int(y) for y in re.findall(r"\b(20\d{2}|19\d{2})\b", preceding)]
+                if len(all_y) >= 2:
+                    header_years = all_y[-len(match.groups()):]
+            if not header_years:
+                header_years = [2025, 2024, 2023][:len(match.groups())]
+
+            num_groups = len(match.groups())
+            if len(header_years) < num_groups:
+                base_y = header_years[-1]
+                while len(header_years) < num_groups:
+                    header_years.append(base_y - 1)
+                    base_y -= 1
+            col_years = header_years[:num_groups]
+
+            row_items = []
+            for g_idx, yr in enumerate(col_years):
+                raw_token = match.group(g_idx + 1)
+                num_raw = raw_token.replace(",", "")
+                val_formatted = f"{pfx}{raw_token} {effective_unit}".strip()
+                try:
+                    num_val = float(num_raw)
+                except ValueError:
+                    num_val = None
+                row_items.append((yr, val_formatted, num_val))
+
             series = [
-                {"year": 2023, "value": v23_val, "numeric_value": float(v23_raw), "unit": f"{effective_unit} {effective_curr}"},
-                {"year": 2024, "value": v24_val, "numeric_value": float(v24_raw), "unit": f"{effective_unit} {effective_curr}"},
-                {"year": 2025, "value": v25_val, "numeric_value": float(v25_raw), "unit": f"{effective_unit} {effective_curr}"},
+                {"year": yr, "value": v_val, "numeric_value": n_val, "unit": f"{effective_unit} {effective_curr}"}
+                for yr, v_val, n_val in sorted(row_items, key=lambda x: x[0])
+                if n_val is not None
             ]
-            yearly[canonical_label] = series
-            for yr, v_val, num_val in [(2023, v23_val, float(v23_raw)), (2024, v24_val, float(v24_raw)), (2025, v25_val, float(v25_raw))]:
-                observations.append({
-                    "metric_name": m_key,
-                    "canonical_label": canonical_label,
-                    "raw_value": v_val,
-                    "numeric_value": num_val,
-                    "currency": effective_curr,
-                    "unit": effective_unit,
-                    "statement_context": "income_statement_audited",
-                    "report_year": yr,
-                    "is_canonical": (yr == 2024 or yr == 2025),
-                })
+            if canonical_label not in yearly:
+                yearly[canonical_label] = series
+
+            latest_year = max(col_years) if col_years else 2025
+            for yr, v_val, num_val in row_items:
+                if num_val is not None:
+                    observations.append({
+                        "metric_name": m_key,
+                        "canonical_label": canonical_label,
+                        "raw_value": v_val,
+                        "numeric_value": num_val,
+                        "currency": effective_curr,
+                        "unit": effective_unit,
+                        "statement_context": "narrative_overview",
+                        "source_section": "narrative_overview",
+                        "report_year": yr,
+                        "year": yr,
+                        "is_canonical": (yr == latest_year or yr == latest_year - 1),
+                        "is_table": False,
+                        "exact_evidence": match.group(0),
+                    })
     two_col_table = _extract_table_yearly_metrics_legacy(text, table_curr, table_unit)
     for k, v in two_col_table.items():
         if k not in yearly:
@@ -1594,6 +2001,8 @@ def _find_observation_conflicts(observations: List[Dict[str, Any]]) -> Dict[str,
 
 def _infer_statement_context(sentence: str, nearby_context: str, default: str) -> str:
     sentence_lower = sentence.casefold()
+    if re.search(r"\b(?:highlights?|overview|summary|cover)\b", sentence_lower):
+        return "narrative_overview"
     if re.search(r"\b(?:disclosure|disclosed|note to|notes to|narrative)\b", sentence_lower):
         return "disclosure"
     if re.search(r"\b(?:segment|division|services?|business line|geographic|regional)\b", sentence_lower):
@@ -1617,7 +2026,8 @@ def _infer_statement_context(sentence: str, nearby_context: str, default: str) -
 _REFERENCE_SECTION_HEADING_RE = re.compile(
     r"(?im)^\s*(?:expected\s+(?:cross[- ]document\s+checks?|comparison\s+behavior|results?)|"
     r"(?:test|reference)\s+values?|comparison\s+examples?|illustrative\s+examples?|"
-    r"expected\s+results?|reference\s+examples?)\s*[:\-]?\s*$"
+    r"expected\s+results?|reference\s+examples?|source\s+references?|sources?|references?|"
+    r"citation\s+references?)\s*[:\-]?\s*$"
 )
 
 _FINANCIAL_SECTION_HEADING_RE = re.compile(
@@ -1633,6 +2043,8 @@ def _is_reference_context(text: str, position: int) -> bool:
         return False
     current_line_start = text.rfind("\n", 0, position) + 1
     current_line = text[current_line_start:text.find("\n", position) if "\n" in text[position:] else len(text)]
+    if re.search(r"\b(?:extracted\s+from\s+pages?|source\s+references?)\b", current_line, re.I):
+        return True
     if _REFERENCE_SECTION_HEADING_RE.search(current_line):
         return True
     last_reference = list(_REFERENCE_SECTION_HEADING_RE.finditer(text[:position + 1]))
@@ -1802,9 +2214,9 @@ def _extract_field_observations(
                         is_percent=is_percent or spec.get("is_percent", False),
                     )
                     classified_metric = _classify_metric_candidate(metric_key, sentence, alias, parsed)
-                    if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", sentence, re.I)) or parsed["raw_value"] not in seen_raw):
-                        if classified_metric != "revenue":
-                            seen_raw.add(parsed["raw_value"])
+                    seen_key = (classified_metric, parsed["raw_value"])
+                    if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and seen_key not in seen_raw:
+                        seen_raw.add(seen_key)
                         obs = dict(parsed)
                         obs.update({
                             "metric_name": classified_metric,
@@ -1836,9 +2248,9 @@ def _extract_field_observations(
                     if parsed:
                         sentence = f"{sentence} {continuation.group(1)}"
             classified_metric = _classify_metric_candidate(metric_key, sentence, alias, parsed)
-            if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", sentence, re.I)) or parsed["raw_value"] not in seen_raw):
-                if classified_metric != "revenue":
-                    seen_raw.add(parsed["raw_value"])
+            seen_key = (classified_metric, parsed["raw_value"]) if parsed else None
+            if classified_metric and not _is_temporal_metric_candidate(sentence, match.start(), parsed) and seen_key not in seen_raw:
+                seen_raw.add(seen_key)
                 obs = dict(parsed)
                 obs["metric_name"] = classified_metric
                 obs["canonical_label"] = "Segment Revenue" if classified_metric == "segment_revenue" else spec.get("canonical_name", metric_key.replace("_", " ").title())
@@ -1861,11 +2273,13 @@ def _extract_field_observations(
                 is_per_share=is_per_share or spec.get("is_per_share", False),
                 is_percent=is_percent or spec.get("is_percent", False),
             )
-            candidate_context = text[max(0, m.start() - 80):m.end()]
+            line_start = text.rfind("\n", 0, m.start())
+            line_start = 0 if line_start == -1 else line_start + 1
+            candidate_context = text[line_start:m.end()]
             classified_metric = _classify_metric_candidate(metric_key, candidate_context, alias, parsed)
-            if classified_metric and not _is_temporal_metric_candidate(text, m.start(), parsed) and ((classified_metric == "revenue" and not re.search(r"\bsegment\b", text[max(0, m.start() - 80):m.end()], re.I)) or parsed["raw_value"] not in seen_raw):
-                if classified_metric != "revenue":
-                    seen_raw.add(parsed["raw_value"])
+            seen_key = (classified_metric, parsed["raw_value"]) if parsed else None
+            if classified_metric and not _is_temporal_metric_candidate(text, m.start(), parsed) and seen_key not in seen_raw:
+                seen_raw.add(seen_key)
                 obs = dict(parsed)
                 obs["metric_name"] = classified_metric
                 obs["canonical_label"] = "Segment Revenue" if classified_metric == "segment_revenue" else spec.get("canonical_name", metric_key.replace("_", " ").title())
@@ -2021,6 +2435,37 @@ def _get_evidence_for_financial_value(
     return None
 
 
+def validate_financial_accounting_invariants(canonical_metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate accounting invariants and nullify colliding values (e.g. compound header collision)."""
+    if not isinstance(canonical_metrics, dict):
+        return canonical_metrics
+
+    assets_raw = canonical_metrics.get("total_assets")
+    liabilities_raw = canonical_metrics.get("total_liabilities")
+    equity_raw = canonical_metrics.get("total_equity")
+
+    if assets_raw is not None and liabilities_raw is not None and equity_raw is not None:
+        p_assets = parse_financial_number(str(assets_raw))
+        p_liab = parse_financial_number(str(liabilities_raw))
+        p_eq = parse_financial_number(str(equity_raw))
+
+        a_val = p_assets.get("numeric_value") if p_assets else None
+        l_val = p_liab.get("numeric_value") if p_liab else None
+        e_val = p_eq.get("numeric_value") if p_eq else None
+
+        if a_val is not None and l_val is not None and e_val is not None:
+            # Check compound header collision where Assets == Liabilities == Equity
+            if abs(a_val - l_val) < 1e-3 and abs(a_val - e_val) < 1e-3:
+                logger.error(
+                    "Accounting invariant violation: Total Assets (%.2f), Total Liabilities (%.2f), and Total Equity (%.2f) are identical due to compound header collision. Nullifying liabilities and equity.",
+                    a_val, l_val, e_val,
+                )
+                canonical_metrics["total_liabilities"] = None
+                canonical_metrics["total_equity"] = None
+
+    return canonical_metrics
+
+
 # ---------------------------------------------------------------------------
 # 7. Core Extraction Agent Public API
 # ---------------------------------------------------------------------------
@@ -2041,10 +2486,16 @@ def _extract_report_metrics(
     document_currency, document_unit = _detect_document_currency_unit(text)
     document_context = {"currency": document_currency, "unit": document_unit}
     table_curr, table_unit = extract_table_header_units(text)
-    resolved_context = resolve_currency_unit_context(
-        table_context={"currency": table_curr, "unit": table_unit},
-        document_context=document_context,
-    )
+    if table_curr or table_unit:
+        resolved_context = resolve_currency_unit_context(
+            table_context={"currency": table_curr, "unit": table_unit},
+            document_context={"currency": table_curr or document_currency, "unit": table_unit or document_unit},
+        )
+    else:
+        resolved_context = resolve_currency_unit_context(
+            table_context={"currency": table_curr, "unit": table_unit},
+            document_context=document_context,
+        )
     table_curr = resolved_context["currency"] if resolved_context["currency"] != "UNKNOWN" else None
     table_unit = resolved_context["unit"] if resolved_context["unit"] != "units" else None
     yearly_metrics, table_observations = _extract_multi_year_financial_tables(
@@ -2108,19 +2559,20 @@ def _extract_report_metrics(
                 observations_by_year.setdefault(year, obs)
         if len(observations_by_year) >= 2:
             label = METRIC_TAXONOMY[metric_key].get("canonical_name", metric_key.replace("_", " ").title())
-            yearly_series = [
-                {
-                    "year": year,
-                    "value": observations_by_year[year].get("raw_value"),
-                    "numeric_value": observations_by_year[year].get("numeric_value"),
-                    "unit": observations_by_year[year].get("unit"),
-                    "currency": observations_by_year[year].get("currency"),
-                    "chunk_id": observations_by_year[year].get("source_chunk_id"),
-                    "source": observations_by_year[year].get("source_file"),
-                }
-                for year in sorted(observations_by_year)
-            ]
-            yearly_metrics[label] = yearly_series
+            if label not in yearly_metrics or len(observations_by_year) > len(yearly_metrics[label]):
+                yearly_series = [
+                    {
+                        "year": year,
+                        "value": observations_by_year[year].get("raw_value"),
+                        "numeric_value": observations_by_year[year].get("numeric_value"),
+                        "unit": observations_by_year[year].get("unit"),
+                        "currency": observations_by_year[year].get("currency"),
+                        "chunk_id": observations_by_year[year].get("source_chunk_id"),
+                        "source": observations_by_year[year].get("source_file"),
+                    }
+                    for year in sorted(observations_by_year)
+                ]
+                yearly_metrics[label] = yearly_series
     canonical_metrics: Dict[str, Optional[str]] = {}
     canonical_observations: Dict[str, Dict[str, Any]] = {}
     for metric_key in (
@@ -2163,10 +2615,7 @@ def _extract_report_metrics(
         if series_name in yearly_metrics:
             series = yearly_metrics[series_name]
             matched = next((item for item in series if item.get("year") == target_year_int), None)
-            if matched and matched.get("value") and (
-                canonical_metrics.get(key) is None
-                or any(item.get("year") == target_year_int for item in series)
-            ):
+            if matched and matched.get("value") and canonical_metrics.get(key) is None:
                 canonical_metrics[key] = str(matched["value"])
     if not canonical_metrics.get("operating_cash_flow") and canonical_metrics.get("cash_flow"):
         canonical_metrics["operating_cash_flow"] = canonical_metrics["cash_flow"]
@@ -2176,6 +2625,7 @@ def _extract_report_metrics(
         canonical_metrics["diluted_eps"] = canonical_metrics["basic_eps"]
     if not canonical_metrics.get("eps") and canonical_metrics.get("basic_eps"):
         canonical_metrics["eps"] = canonical_metrics["basic_eps"]
+    canonical_metrics = validate_financial_accounting_invariants(canonical_metrics)
     software_val = None
     consulting_val = None
     infra_val = None
@@ -2296,8 +2746,8 @@ def _extract_report_metrics(
                 if obs.get("metric_name") in {"basic_eps", "diluted_eps"}
                 and obs.get("raw_value") == display_value
             ]
-        candidate = canonical_observations.get(key)
-        if candidate is None:
+        candidate = canonical_observations.get(key) if display_value is not None else None
+        if candidate is None and display_value is not None:
             candidate = next((obs for obs in candidates if obs.get("report_year") == target_year_int), None) or (candidates[0] if candidates else None)
         parsed = parse_financial_number(
             str(display_value),
@@ -2398,6 +2848,7 @@ def _extract_report_metrics(
         "material_weakness": material_weakness,
         "cash_reconciliation": cash_reconciliation,
         "financial_value_conflicts": financial_value_conflicts,
+        "canonical_observations": canonical_observations,
     }
     if metadata:
         for key in ("analysis_id", "document_id", "chunk_id", "source", "source_file"):
@@ -2411,7 +2862,44 @@ def _extract_report_metrics(
     ):
         if result.get(key) in ("", "Not Found", "not found", "null", "None"):
             result[key] = None
+
+    total_pages = 500
+    if chunk_records:
+        page_candidates = [
+            int(c.get("page_end") or c.get("page_start") or 1)
+            for c in chunk_records if isinstance(c, dict) and (c.get("page_end") or c.get("page_start"))
+        ]
+        if page_candidates:
+            total_pages = max(page_candidates)
+    result = validate_extracted_metrics(result, total_pages=total_pages)
     return result
+
+
+def validate_extracted_metrics(extracted_json: dict, total_pages: int = 500) -> dict:
+    validated = dict(extracted_json)
+    flags = list(validated.get("validation_flags", []))
+
+    def _parse(val):
+        if not isinstance(val, str): return val
+        match = __import__('re').search(r"[-+]?\d[\d,]*(?:\.\d+)?", val)
+        return float(match.group(0).replace(",", "")) if match else None
+
+    # Balance Sheet Invariant
+    a, l, e = _parse(validated.get("total_assets")), _parse(validated.get("total_liabilities")), _parse(validated.get("total_equity"))
+    if a and l and e and abs(a - (l + e)) > (0.05 * a):
+        flags.append(f"Invariant Violation: Assets ({a}) != Liabs ({l}) + Equity ({e})")
+
+    # Page Hallucination Check
+    for k in ["revenue", "operating_cash_flow", "capex"]:
+        v = validated.get(k)
+        if isinstance(v, str):
+            num = _parse(v)
+            if num and num.is_integer() and 1 <= num <= total_pages:
+                if not __import__('re').search(r"(crore|lakh|million|billion|[$€£₹]|INR|USD)", v, __import__('re').I):
+                    flags.append(f"Page Hallucination: {k} matched page {int(num)}")
+
+    validated["validation_flags"] = flags
+    return validated
 
 
 def extract_report_metrics(

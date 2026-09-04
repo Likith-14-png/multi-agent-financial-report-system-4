@@ -75,6 +75,14 @@ class AdaptiveRetrievalPlanner:
             queries.append(f"{comp}Management Discussion and Analysis results of operations drivers {metrics_focus} explanation")
             queries.append(f"{comp}factors contributing to increase decrease changes in profitability expenses largest impact")
 
+        # 3b. Non-cash, divergence, and anomaly triggers
+        if any(w in intent.original_question.lower() for w in ["non-cash", "divergence", "anomaly"]):
+            queries.append(f"{comp}Accounting Notes".strip())
+            queries.append(f"{comp}Significant Accounting Policies".strip())
+            queries.append(f"{comp}Cash Flow Adjustments".strip())
+            queries.append(f"{comp}Accounting Notes Significant Accounting Policies provisions depreciation amortization".strip())
+            queries.append(f"{comp}Statement of Cash Flows Cash Flow Adjustments non-cash expenses working capital".strip())
+
         # 4. Generate queries from unsatisfied requirements in requirement_graph
         if requirement_graph:
             for req in requirement_graph.get_unsatisfied():

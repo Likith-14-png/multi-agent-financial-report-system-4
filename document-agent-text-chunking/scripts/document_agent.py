@@ -166,10 +166,30 @@ class DocumentAgent:
 
     @staticmethod
     def clean_text(text: str) -> str:
-        text = DocumentAgent.normalize_text(text)
-        text = "".join(c for c in text if c.isprintable() or c in "\n\t")
-        text = re.sub(r"[ \t]+", " ", text)
-        return re.sub(r"\n{3,}", "\n\n", text).strip()
+        """Normalize text while strictly preserving Markdown table delimiters and spacing."""
+        text = "".join(c for c in text if c.isprintable() or c in "\n\t|")
+        # Squash multiple spaces ONLY if they are not part of a markdown table boundary
+        return re.sub(r"(?<!\|)[ \t]{2,}(?!\|)", " ", text).strip()
+
+    @staticmethod
+    def _table_to_markdown(table_data: list) -> str:
+        if not table_data or not any(table_data):
+            return ""
+        cleaned_rows = [
+            [re.sub(r"\s+", " ", str(cell or "")).strip().replace("|", "\\|") for cell in row]
+            for row in table_data
+        ]
+        cleaned_rows = [r for r in cleaned_rows if any(r)]
+        if not cleaned_rows:
+            return ""
+        max_cols = max(len(row) for row in cleaned_rows)
+        for row in cleaned_rows:
+            row.extend([""] * (max_cols - len(row)))
+        md_lines = ["| " + " | ".join(cleaned_rows[0]) + " |", "| " + " | ".join([":---"] * max_cols) + " |"]
+        for row in cleaned_rows[1:]:
+            md_lines.append("| " + " | ".join(row) + " |")
+        return "\n".join(md_lines)
+
 
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -307,62 +327,34 @@ class DocumentAgent:
             raise ValueError("OCR produced no readable pages")
         return "\n\n".join(record["text"] for record in records), records
 
-    def _extract_pdf_text(self, path: Path) -> Tuple[str, List[Dict[str, Any]]]:
-        if fitz is not None:
-            logger.info("Extracting text from PDF with PyMuPDF %s", path.name)
-            try:
-                with fitz.open(path) as document:
-                    raw_pages = [self.clean_text(page.get_text("text") or "") for page in document]
-            except Exception as exc:
-                logger.warning("PyMuPDF extraction failed for %s, trying PyPDF2: %s", path.name, exc)
-            else:
-                pages = self._remove_repeated_margins(raw_pages)
-                records = []
-                for number, page in enumerate(pages, 1):
-                    cleaned = self.clean_text(page)
-                    if cleaned:
-                        records.append({"page_number": number, "text": cleaned, "content_length": len(cleaned)})
-                if records:
-                    return "\n\n".join(record["text"] for record in records), records
-                if self.config.ocr_callback:
-                    logger.info("PyMuPDF found no readable text, falling back to OCR for %s", path.name)
-                    return self._extract_with_ocr(path)
-        if PyPDF2 is None:
-            raise ImportError("PyMuPDF or PyPDF2 is required for PDF ingestion") from _IMPORT_ERROR
-        logger.info("Extracting text from PDF %s", path.name)
-        try:
-            with path.open("rb") as handle:
-                reader = PyPDF2.PdfReader(handle)
-                if getattr(reader, "is_encrypted", False):
-                    try:
-                        if not reader.decrypt(""):
-                            raise ValueError("encrypted PDF requires a password")
-                    except Exception as exc:
-                        raise ValueError("encrypted PDF cannot be read") from exc
-
-                searchable = self._is_searchable_pdf(reader)
-                if searchable:
-                    logger.info("Detecting PDF type for %s: searchable text", path.name)
-                    raw_pages = [self._extract_page_text(page) for page in reader.pages]
-                    if not any(page.strip() for page in raw_pages) and self.config.ocr_callback:
-                        logger.info("Searchable PDF yielded no text, falling back to OCR for %s", path.name)
-                        return self._extract_with_ocr(path)
-                else:
-                    logger.info("Detecting PDF type for %s: scanned document", path.name)
-                    return self._extract_with_ocr(path)
-        except Exception as exc:
-            raise ValueError(f"Unable to open or read PDF: {exc}") from exc
-
-        pages = self._remove_repeated_margins(raw_pages)
+    def _extract_pdf_text(self, path) -> tuple:
+        import fitz
         records = []
-        for number, page in enumerate(pages, 1):
-            cleaned = self.clean_text(page)
-            if cleaned:
-                records.append({"page_number": number, "text": cleaned, "content_length": len(cleaned)})
-        if not records and self.config.ocr_callback:
-            logger.info("PDF text extraction produced no readable pages, falling back to OCR for %s", path.name)
-            return self._extract_with_ocr(path)
-        return "\n\n".join(record["text"] for record in records), records
+        with fitz.open(path) as document:
+            for number, page in enumerate(document, 1):
+                page_elements = []
+                tables = page.find_tables()
+                table_bboxes = [fitz.Rect(t.bbox) for t in tables]
+                for t in tables:
+                    md_table = self._table_to_markdown(t.extract())
+                    if md_table.strip():
+                        page_elements.append((t.bbox[1], md_table))
+
+                for b in page.get_text("blocks"):
+                    is_text = b[6] == 0 if len(b) > 6 else True
+                    if len(b) >= 5 and is_text:
+                        rect = fitz.Rect(b[:4])
+                        if not any((rect & tb).get_area() > 0.15 * rect.get_area() for tb in table_bboxes):
+                            if b[4].strip():
+                                page_elements.append((b[1], b[4].strip()))
+
+                page_elements.sort(key=lambda x: x[0])
+                page_text = "\n\n".join(x[1] for x in page_elements)
+                cleaned = self.clean_text(page_text)
+                if cleaned:
+                    records.append({"page_number": number, "text": cleaned, "content_length": len(cleaned)})
+
+        return "\n\n".join(r["text"] for r in records), records
 
     def _extract_pdf_metadata(self, path: Path) -> Dict[str, str]:
         metadata: Dict[str, str] = {}
@@ -1160,8 +1152,9 @@ class DocumentAgent:
 
         def _normalize_candidate(value: str) -> str:
             candidate = re.sub(r"\s+", " ", value).strip()
+            candidate = re.sub(r"\(formerly\b[^)]*\)", "", candidate, flags=re.I).strip()
             candidate = re.sub(r"^\s*(?:page\s*)?\d{1,4}\s+", "", candidate, flags=re.I)
-            candidate = re.sub(r"^(?:the\s+)?(?:company|issuer|registrant|issuer name|registrant name|company name)\s*[:\-]\s*", "", candidate, flags=re.I)
+            candidate = re.sub(r"^(?:the\s+)?(?:company\s+name|company|issuer\s+name|issuer|registrant\s+name|registrant|legal\s+entity|name)\s*[:\-]\s*", "", candidate, flags=re.I)
             candidate = re.sub(r"\s+(?:annual|quarterly|sustainability|esg|proxy|integrated|report|statement|letter|results|update|presentation|shareholder|notice|form)(?:\s+(?:report|statement|letter|results|update|presentation|shareholder|notice|form))*\s*(?:\b(?:19|20)\d{2}\b)?$", "", candidate, re.I)
             if candidate.endswith(")") and "(" in candidate and candidate.count("(") == candidate.count(")"):
                 candidate = re.sub(r"^[^A-Za-z0-9(]+|[^A-Za-z0-9.)]+$", "", candidate)
@@ -1182,6 +1175,7 @@ class DocumentAgent:
                 "revenue", "sales", "income", "profit", "loss", "assets", "liabilities",
                 "equity", "debt", "cash flow", "margin", "balance sheet", "income statement",
                 "financial statement", "table", "metric", "primary unit", "currency",
+                "ticker", "tickers", "stock ticker", "stock tickers",
             )
             if any(term in haystack for term in blocked_financial_terms):
                 return False
@@ -1198,7 +1192,7 @@ class DocumentAgent:
                 return False
             if re.search(r"\b(?:dear|shareholders?|colleagues|customers?|partners?|letter from|message from)\b", haystack, re.I):
                 return False
-            if re.search(r"\b(?:annual|quarterly|sustainability|esg|proxy|integrated|report|statement|presentation|letter|notice|form|financial|management|risk|auditor|page|section|table|figure|note|notes|about|business overview|security overview|cybersecurity|income statement|balance sheets?|cash flows?|governance|liquidity|dividends?|initiative|program|project|campaign)\b", normalized, re.I):
+            if re.search(r"\b(?:annual|quarterly|sustainability|esg|proxy|integrated|report|statement|presentation|letter|notice|form|financial|management|risk|auditor|page|section|table|figure|note|notes|about|business overview|security overview|cybersecurity|income statement|balance sheets?|cash flows?|governance|liquidity|dividends?|initiative|program|project|campaign|cover|company information|corporate information|company profile|overview)\b", normalized, re.I):
                 return False
             if re.search(r"\b(?:github copilot|copilot|azure|windows|office|word|microsoft 365|artificial intelligence|generative ai|\bai\b)\b", normalized, re.I):
                 return False
@@ -1320,7 +1314,7 @@ class DocumentAgent:
         # Explicit entity fields outrank all title, header, and metadata candidates.
         cover_lines = [_clean_line(line) for line in cover.splitlines() if _clean_line(line)]
         explicit_labels = re.compile(
-            r"^(?:company|company name|legal entity|registered name|issuer|issuer name|registrant|registrant name)\s*[:\-]?\s*(.*)$",
+            r"^(?:company\s+name|company|legal entity|registered name|issuer\s+name|issuer|registrant\s+name|registrant|name)\s*[:\-]?\s*(.*)$",
             re.I,
         )
         for index, line in enumerate(cover_lines[:80]):

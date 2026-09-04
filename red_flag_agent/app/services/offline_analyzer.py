@@ -40,6 +40,9 @@ class OfflineAnalyzer:
             ],
             "negations": [
                 r"\b(?:no|not|never|none)\b[^.!?]{0,80}\b(?:margin|profitability)\b[^.!?]{0,80}\b(?:declin(?:e|ed|ing)|fell|drop(?:ped)?|reduc(?:e|ed|tion))\b",
+                r"\b(?:margin|profitability)\b[^.!?]{0,120}\b(?:expand(?:ed|ing|s)?|improv(?:ed|ing|es)?|increas(?:ed|ing|es)?|rose|higher|grew|growth|up)\b",
+                r"\b(?:expand(?:ed|ing|s)?|improv(?:ed|ing|es)?|increas(?:ed|ing|es)?|rose|higher|grew|growth|up)\b[^.!?]{0,120}\b(?:margin|profitability)\b",
+                r"\b(?:from\s+\d+(?:\.\d+)?%\s+to\s+\d+(?:\.\d+)?%)\b",
             ],
         },
         {
@@ -313,12 +316,14 @@ class OfflineAnalyzer:
             return bool(re.search(r"(?:litigation|lawsuit|investigation|penalty|regulatory).{0,100}(?:exposure|risk|claim|proceeding|material|significant|pending|settlement)", lowered))
         if category == "Market":
             has_fx_or_rate_signal = bool(re.search(r"(?:foreign exchange|fx|exchange rate|currency|interest rate|rates)", lowered))
-            has_explicit_risk_signal = bool(re.search(r"(?:market risk|risk factors?|drivers? of market risk|foreign exchange risk|currency risk|interest rate risk|exposure|sensitivity|volatility risk|risk from|headwind|pressure)", lowered))
+            has_explicit_risk_signal = bool(re.search(r"(?:market risk|risk factors?|drivers? of market risk|foreign exchange risk|currency risk|interest rate risk|exposure|sensitivity|volatility(?: risk)?|risk from|headwind|pressure)", lowered))
             if re.search(r"\b(?:could|may|might)\s+(?:affect|impact|pressure|hurt|weaken|reduce)\b", lowered) and not has_explicit_risk_signal:
                 return False
             if not has_fx_or_rate_signal or not has_explicit_risk_signal:
                 return False
             return True
+        if rule["category"] == "Profitability" and OfflineAnalyzer._is_margin_expansion(sentence):
+            return False
         return True
 
     @staticmethod
@@ -369,7 +374,48 @@ class OfflineAnalyzer:
         return "Low"
 
     @staticmethod
+    def _is_margin_expansion(sentence: str) -> bool:
+        """Detect margin expansion or profitability improvement so it is never flagged as a risk."""
+        lowered = sentence.casefold()
+        expansion_terms = [
+            "expanded", "expansion", "improved", "improvement",
+            "increased", "increase", "rising", "rose", "growth",
+            "higher margin", "margin expansion", "margin improvement",
+        ]
+        has_expansion_term = any(term in lowered for term in expansion_terms)
+        has_margin_context = any(term in lowered for term in ["margin", "profitability", "ebitda", "operating margin", "gross margin", "pat"])
+
+        # Check for numeric margin transition e.g., "from 2.0% to 10.3%"
+        pct_match = re.search(r"from\s+(\d+(?:\.\d+)?)\s*%\s+to\s+(\d+(?:\.\d+)?)\s*%", lowered)
+        if pct_match:
+            try:
+                start_val = float(pct_match.group(1))
+                end_val = float(pct_match.group(2))
+                if end_val > start_val:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        # Check "expanded to 10.3% from 2.0%" or "grew ... to 10.3% compared to 2.0%"
+        rev_pct_match = re.search(r"(?:to|at)\s+(\d+(?:\.\d+)?)\s*%\s+(?:from|compared to|versus|up from)\s+(\d+(?:\.\d+)?)\s*%", lowered)
+        if rev_pct_match:
+            try:
+                end_val = float(rev_pct_match.group(1))
+                start_val = float(rev_pct_match.group(2))
+                if end_val > start_val:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        if has_expansion_term and has_margin_context and not any(neg in lowered for neg in ["not expand", "did not improve", "failed to expand"]):
+            return True
+
+        return False
+
+    @staticmethod
     def _has_conflicting_positive_context(rule: Dict[str, Any], sentence: str) -> bool:
+        if rule.get("category") == "Profitability" and OfflineAnalyzer._is_margin_expansion(sentence):
+            return True
         lowered = sentence.casefold()
         terms = {
             "Liquidity": ["liquidity", "working capital", "cash position", "balance sheet", "cash flow"],
