@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -703,7 +704,16 @@ class AnalysisWorkflow:
             records_b = []
 
         combined_text_b = "\n\n".join(doc for doc, _ in records_b if isinstance(doc, str))
-        meta_b = records_b[0][1] if records_b else {}
+        if not combined_text_b or len(combined_text_b.strip()) < 20:
+            raw_text, _ = self.document_agent.extract_text(path_b)
+            combined_text_b = raw_text or ""
+
+        meta_b = dict(records_b[0][1]) if records_b else {}
+        if second_company_name:
+            meta_b["company_name"] = str(second_company_name).strip()
+        if second_report_year:
+            meta_b["report_year"] = str(second_report_year).strip()
+
         try:
             extracted_b = extract_report_metrics(combined_text_b, metadata=meta_b)
         except Exception:
@@ -777,6 +787,13 @@ class AnalysisWorkflow:
                 }
 
             res = compare_company_metrics(obs_a, obs_b, metric_name=label)
+            val_a = res.get("company_a", {}).get("value") if isinstance(res.get("company_a"), dict) else res.get("company_a")
+            val_b = res.get("company_b", {}).get("value") if isinstance(res.get("company_b"), dict) else res.get("company_b")
+            res["company_a_value"] = res.get("company_a_value", val_a)
+            res["company_b_value"] = res.get("company_b_value", val_b)
+            pct_diff = res.get("percentage_difference")
+            res["difference_pct"] = res.get("difference_pct", pct_diff)
+            res["diff_percent"] = res.get("diff_percent", pct_diff)
             comparison_records.append(res)
 
         comparison_status = "completed" if any(row.get("comparison_status") in {"higher", "lower", "equal"} for row in comparison_records) else "partial"
@@ -787,6 +804,16 @@ class AnalysisWorkflow:
             if first_year not in (None, "") and second_year not in (None, "") and str(first_year) != str(second_year)
             else "single_year"
         )
+        summary_bullets = [
+            f"- **{row.get('metric')}**: {row.get('interpretation')}"
+            for row in comparison_records
+            if row.get("interpretation") and "cannot be performed" not in str(row.get("interpretation")).lower()
+        ]
+        if summary_bullets:
+            summary_text = f"**Benchmark Analysis ({first_company_name} vs. {effective_b_name}):**\n\n" + "\n".join(summary_bullets)
+        else:
+            summary_text = f"Benchmark comparison completed between **{first_company_name}** and **{effective_b_name}** across {len(comparison_records)} key metrics."
+
         return {
             "analysis_id": analysis_id,
             "comparison_id": comparison_id,
@@ -796,7 +823,8 @@ class AnalysisWorkflow:
             "comparison_type": comparison_type,
             "metrics": comparison_records,
             "records": comparison_records,
-            "summary": {
+            "summary": summary_text,
+            "summary_metadata": {
                 "companies_compared": [first_company_name, effective_b_name],
                 "metrics_analyzed": len(comparison_records),
                 "comparison_status": comparison_status,

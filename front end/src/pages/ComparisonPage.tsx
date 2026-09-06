@@ -139,19 +139,38 @@ export function ComparisonPage() {
     setErrorMessage(null);
   };
 
-  const compA = comparison?.companies?.[0] || activeCompany || 'Company A';
-  const compB = comparison?.companies?.[1] || 'Company B';
+  const cleanCompName = (name?: string | null) => {
+    if (!name) return '';
+    return name.replace(/^(name|company(?:\s+name)?)\s*[:\-]\s*/i, '').trim();
+  };
+  const compA = cleanCompName(comparison?.companies?.[0]) || cleanCompName(activeCompany) || 'Company A';
+  const compB = cleanCompName(comparison?.companies?.[1]) || 'Company B';
 
   const records: ComparisonRecord[] = comparison?.records || [];
 
+  const getCompanyVal = (val: unknown) => {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'object') {
+      const obj = val as Record<string, unknown>;
+      return obj.display_value ?? obj.value ?? obj.comparison_value ?? obj.numeric_value ?? obj.raw_value ?? null;
+    }
+    return val;
+  };
+
   // Build bar comparison items
-  const barChartData: ComparisonBarItem[] = records.map((r) => ({
-    metric: r.metric,
-    companyA: parseNumericValue(r.company_a_value ?? r.company_a),
-    companyB: parseNumericValue(r.company_b_value ?? r.company_b),
-    displayA: String(r.company_a_value ?? r.company_a ?? '—'),
-    displayB: String(r.company_b_value ?? r.company_b ?? '—'),
-  }));
+  const barChartData: ComparisonBarItem[] = records.map((r) => {
+    const rawA = r.company_a_value ?? getCompanyVal(r.company_a);
+    const rawB = r.company_b_value ?? getCompanyVal(r.company_b);
+    const numA = parseNumericValue(rawA);
+    const numB = parseNumericValue(rawB);
+    return {
+      metric: r.metric,
+      companyA: numA,
+      companyB: numB,
+      displayA: rawA !== null && rawA !== undefined ? formatFinancialValue(rawA) : '—',
+      displayB: rawB !== null && rawB !== undefined ? formatFinancialValue(rawB) : '—',
+    };
+  });
 
   return (
     <div className="max-w-6xl mx-auto space-y-6 pb-12">
@@ -381,17 +400,19 @@ export function ComparisonPage() {
                 <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
                   {records.length > 0 ? (
                     records.map((rec, idx) => {
-                      const diffPct = rec.difference_pct ?? rec.diff_percent;
+                      const valA = rec.company_a_value ?? getCompanyVal(rec.company_a);
+                      const valB = rec.company_b_value ?? getCompanyVal(rec.company_b);
+                      const diffPct = rec.difference_pct ?? rec.diff_percent ?? rec.percentage_difference;
                       return (
                         <tr key={idx} className="hover:bg-slate-900/40 transition-colors">
                           <td className="py-3.5 px-5 font-sans font-medium text-slate-200">
                             {rec.metric}
                           </td>
                           <td className="py-3.5 px-5 font-bold text-cyan-300">
-                            {formatFinancialValue(rec.company_a_value ?? rec.company_a)}
+                            {formatFinancialValue(valA)}
                           </td>
                           <td className="py-3.5 px-5 font-bold text-indigo-300">
-                            {formatFinancialValue(rec.company_b_value ?? rec.company_b)}
+                            {formatFinancialValue(valB)}
                           </td>
                           <td className="py-3.5 px-5 text-right text-slate-300">
                             {rec.difference !== undefined && rec.difference !== null
@@ -430,7 +451,20 @@ export function ComparisonPage() {
                 {typeof comparison.summary === 'string' ? (
                   <MarkdownRenderer content={comparison.summary} />
                 ) : (
-                  <p>{JSON.stringify(comparison.summary)}</p>
+                  <div className="space-y-1.5">
+                    <p className="font-semibold text-slate-200">
+                      Benchmark Analysis: {compA} vs. {compB}
+                    </p>
+                    <ul className="list-disc list-inside space-y-1 text-slate-300">
+                      {records
+                        .filter((r) => r.interpretation && !r.interpretation.includes('cannot be performed'))
+                        .map((r, i) => (
+                          <li key={i}>
+                            <span className="font-medium text-cyan-300">{r.metric}:</span> {r.interpretation}
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
                 )}
               </div>
             </Card>
