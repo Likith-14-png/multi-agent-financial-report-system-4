@@ -221,11 +221,12 @@ export interface ComparisonRecord {
   metric: string;
   company_a_value?: string | number | null;
   company_b_value?: string | number | null;
-  company_a?: string | number | null;
-  company_b?: string | number | null;
+  company_a?: string | number | Record<string, unknown> | null;
+  company_b?: string | number | Record<string, unknown> | null;
   difference?: string | number | null;
   difference_pct?: string | number | null;
   diff_percent?: string | number | null;
+  percentage_difference?: string | number | null;
   direction?: 'higher' | 'lower' | 'equal' | 'favorable' | 'unfavorable' | string | null;
   interpretation?: string | null;
   category?: string | null;

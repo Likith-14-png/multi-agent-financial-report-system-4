@@ -8,7 +8,7 @@ import { RiskSeverity } from './types';
  * Format currency or number with human-friendly suffixes
  */
 export function formatFinancialValue(
-  value: string | number | null | undefined,
+  value: unknown,
   currency: string = '$',
   unit?: string | null
 ): string {
@@ -16,13 +16,35 @@ export function formatFinancialValue(
     return 'Not available';
   }
 
+  // If value is an object (e.g. { value: 123, currency: '$', unit: 'billion' })
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const target =
+      obj.display_value ??
+      obj.formatted ??
+      obj.value ??
+      obj.comparison_value ??
+      obj.numeric_value ??
+      obj.raw_value;
+    if (target !== undefined && target !== null && target !== value) {
+      const objUnit = (obj.unit as string) || (obj.unit_scale as string) || unit;
+      const objCurr = (obj.currency as string) || currency;
+      return formatFinancialValue(target, objCurr, objUnit);
+    }
+    return 'Not available';
+  }
+
   // If it's already a formatted string like "$15.3 billion" or "70.1 %", return cleaned
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    if (/^(na|n\/a|null|undefined|none|not found)$/i.test(trimmed)) {
+    if (/^(na|n\/a|null|undefined|none|not found|nan)$/i.test(trimmed)) {
       return 'Not available';
     }
     return trimmed;
+  }
+
+  if (typeof value !== 'number' || isNaN(value)) {
+    return 'Not available';
   }
 
   const absVal = Math.abs(value);
@@ -48,18 +70,31 @@ export function formatFinancialValue(
 /**
  * Format percentage
  */
-export function formatPercent(value: string | number | null | undefined): string {
+export function formatPercent(value: unknown): string {
   if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const target = obj.percentage_difference ?? obj.difference_pct ?? obj.value;
+    if (target !== undefined && target !== null && target !== value) {
+      return formatPercent(target);
+    }
     return '—';
   }
   if (typeof value === 'string') {
     const trimmed = value.trim();
+    if (/^(na|n\/a|null|undefined|none|nan)$/i.test(trimmed)) return '—';
     if (trimmed.endsWith('%')) return trimmed;
     const num = parseFloat(trimmed.replace('%', ''));
     if (!isNaN(num)) return `${num >= 0 ? '+' : ''}${num.toFixed(1)}%`;
     return trimmed;
   }
-  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+  if (typeof value === 'number') {
+    if (isNaN(value)) return '—';
+    return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`;
+  }
+  return '—';
 }
 
 /**
@@ -126,13 +161,27 @@ export function formatFileSize(bytes: number): string {
  */
 export function parseNumericValue(val: unknown): number | null {
   if (typeof val === 'number') return isNaN(val) ? null : val;
-  if (!val || typeof val !== 'string') return null;
+  if (!val) return null;
+  if (typeof val === 'object' && val !== null) {
+    const obj = val as Record<string, unknown>;
+    const candidate =
+      obj.numeric_value ??
+      obj.comparison_value ??
+      obj.value ??
+      obj.display_value ??
+      obj.raw_value;
+    if (candidate !== undefined && candidate !== null && candidate !== val) {
+      return parseNumericValue(candidate);
+    }
+    return null;
+  }
+  if (typeof val !== 'string') return null;
   const clean = val.replace(/[$€£,]/g, '').trim();
   const match = clean.match(/[-+]?\d*\.?\d+/);
   if (!match) return null;
   const num = parseFloat(match[0]);
-  if (clean.toLowerCase().includes('billion')) return num * 1_000_000_000;
-  if (clean.toLowerCase().includes('million')) return num * 1_000_000;
+  if (clean.toLowerCase().includes('billion') || clean.toLowerCase().includes('b')) return num * 1_000_000_000;
+  if (clean.toLowerCase().includes('million') || clean.toLowerCase().includes('m')) return num * 1_000_000;
   if (clean.toLowerCase().includes('thousand') || clean.toLowerCase().includes('k')) return num * 1_000;
   return num;
 }

@@ -907,6 +907,7 @@ def _extract_company_name(text: str, metadata: Optional[Dict[str, Any]] = None) 
         return True
 
     def clean_explicit(value: str) -> str:
+        value = re.sub(r"^\s*(?:company(?:\s+name)?|legal\s+entity|registered\s+name|issuer(?:\s+name)?|registrant(?:\s+name)?|name)\s*[:\-]\s*", "", value, flags=re.I)
         value = re.sub(r"\s+", " ", value).strip(" \t:;,.-")
         value = re.sub(r"\s+(?:annual|financial|integrated|sustainability)\s+report(?:\s+(?:19|20)\d{2})?$", "", value, flags=re.I)
         return value.strip()
@@ -915,7 +916,7 @@ def _extract_company_name(text: str, metadata: Optional[Dict[str, Any]] = None) 
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
 
     explicit_pattern = re.compile(
-        r"^\s*(?:company(?:\s+name)?|legal\s+entity|registered\s+name|issuer(?:\s+name)?|registrant(?:\s+name)?)\s*[:\-]\s*(.+?)\s*$",
+        r"^\s*(?:company(?:\s+name)?|legal\s+entity|registered\s+name|issuer(?:\s+name)?|registrant(?:\s+name)?|name)\s*[:\-]\s*(.+?)\s*$",
         re.I,
     )
     for index, line in enumerate(lines[:80]):

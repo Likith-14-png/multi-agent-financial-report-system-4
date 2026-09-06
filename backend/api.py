@@ -911,10 +911,12 @@ async def upload_comparison(
     else:
         first_extracted = session.extraction_result
 
+    raw_comp_a = session.company_name or "Company A"
+    comp_a_name = re.sub(r"^(?:name|company(?:\s+name)?)\s*[:\-]\s*", "", raw_comp_a, flags=re.I).strip()
     try:
         comparison_result = workflow.run_comparison(
             analysis_id=analysis_id,
-            first_company_name=session.company_name or "Company A",
+            first_company_name=comp_a_name or "Company A",
             first_extracted=first_extracted,
             second_report_path=temp_path_b,
             second_company_name=company_name,
