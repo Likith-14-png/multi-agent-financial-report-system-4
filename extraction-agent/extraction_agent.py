@@ -406,10 +406,10 @@ def _is_temporal_year_label(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", str(text or "")).strip(" .:;=-")
     if not normalized:
         return False
-    if re.fullmatch(r"FY\s*(?:19|20)\d{2}", normalized, re.I):
+    if re.fullmatch(r"FY\s*'?\s*(?:19|20)?\d{2}", normalized, re.I):
         return True
     return bool(re.fullmatch(
-        r"(?:for|during|as of|year ended|fiscal year|financial year)\s+(?:the\s+year\s+ended\s+)?(?:FY\s*)?(?:19|20)\d{2}",
+        r"(?:for|during|as of|year ended|fiscal year|financial year)\s+(?:the\s+year\s+ended\s+)?(?:FY\s*)?(?:19|20)?\d{2}",
         normalized,
         re.I,
     ))
@@ -928,13 +928,21 @@ def _coalesce_metadata(metadata: Optional[Dict[str, Any]], *keys: str) -> Option
 
 def _extract_company_name(text: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
     metadata_value = _coalesce_metadata(metadata, "company_name")
-    invalid_metadata = {"unknown", "none", "null", "not found"}
+    invalid_metadata = {
+        "unknown", "none", "null", "not found", "extracted from source",
+        "extracted from source report", "extracted from", "source report",
+    }
+    boilerplate_re = re.compile(
+        r"(?i)\b(?:extracted\s+from(?:\s+source)?|source\s+report|downloaded\s+from|page\s+\d+|synthetic\s+(?:financial\s+)?report|table\s+of\s+contents|all\s+rights\s+reserved|disclaimer|confidential)\b"
+    )
 
     def valid_candidate(value: Any) -> bool:
         candidate = _normalize_value(str(value)) if value is not None else None
         if not candidate or len(candidate) < 3 or len(candidate.split()) > 10:
             return False
         lowered = candidate.casefold()
+        if boilerplate_re.search(candidate):
+            return False
         blocked_fragments = (
             "million", "billion", "thousand", "crore", "lakh", "percent", "percentage",
             "revenue", "sales", "income", "profit", "loss", "assets", "liabilities",
@@ -979,9 +987,11 @@ def _extract_company_name(text: str, metadata: Optional[Dict[str, Any]] = None) 
         for pattern in title_patterns:
             match = pattern.match(line)
             if match:
-                candidate = clean_explicit(match.group(1))
-                if valid_candidate(candidate):
-                    candidates.append((1, index, candidate))
+                prefix = match.group(1)
+                if not boilerplate_re.search(prefix):
+                    candidate = clean_explicit(prefix)
+                    if valid_candidate(candidate):
+                        candidates.append((1, index, candidate))
 
     for index, line in enumerate(lines[:40]):
         match = re.match(r"^\s*(.+?)\s+(?:Ltd\.?|Limited|Inc\.?|Incorporated|Corp\.?|Corporation|Holdings|Group|PLC|LLC)\.?\s*$", line, re.I)
@@ -1464,8 +1474,33 @@ def _score_candidate(cand: Dict[str, Any], target_year: Optional[int] = None) ->
     elif is_narrative:
         score -= 20.0
 
-    # Penalize partial equity matches when selecting Total Equity
+    # Strict taxonomy Unit-Type Compatibility
     metric_name = str(cand.get("metric_name") or "").lower()
+    spec = METRIC_TAXONOMY.get(metric_name) or {}
+    is_metric_percent = spec.get("is_percent", False)
+
+    cand_unit = str(cand.get("unit") or "").lower()
+    cand_raw = str(cand.get("raw_value") or "")
+    cand_evidence = str(cand.get("exact_evidence") or "").lower()
+    cand_is_percent = bool(
+        cand.get("is_percent") is True
+        or cand_unit in ("percent", "%", "bps")
+        or cand_raw.endswith("%")
+        or "%" in cand_raw
+    )
+
+    # If monetary metric (is_percent is False), disqualify percentage/ratio candidates
+    if not is_metric_percent and cand_is_percent:
+        return float("-inf")
+    # If percentage metric (is_percent is True), disqualify non-percentage candidates
+    if is_metric_percent and not cand_is_percent:
+        return float("-inf")
+
+    # If monetary metric, also disqualify candidates derived from ratio/percentage phrases in evidence
+    if not is_metric_percent and re.search(r"(?i)\b(?:as\s+(?:a\s+)?(?:%|percentage)\s+of|%\s+of|percentage\s+of)\b", cand_evidence):
+        return float("-inf")
+
+    # Penalize partial equity matches when selecting Total Equity
     if metric_name == "total_equity":
         evidence_str = str(cand.get("exact_evidence") or cand.get("raw_value") or cand.get("canonical_label") or "").lower()
         if any(term in evidence_str for term in ("other equity", "equity share capital", "share capital", "equity shares", "instrument entirely equity")):
@@ -1660,7 +1695,14 @@ def _extract_multi_year_financial_tables(
                         row_label = row_cells[0]
                         matched_key = None
                         matched_canonical = None
-                        if re.search(r"(?i)\b(?:Total\s+Revenue|Revenue\s+from\s+operations|Revenues?)\b", row_label):
+                        ratio_or_pct_row = re.search(
+                            r"(?i)\b(?:as\s+(?:a\s+)?(?:%|percentage)\s+of|%\s+of|percentage\s+of|margin\s+rate|growth(?:\s+rate)?|ratio|per\s+employee|per\s+share)\b",
+                            row_label,
+                        )
+                        if ratio_or_pct_row:
+                            matched_key = None
+                            matched_canonical = None
+                        elif re.search(r"(?i)\b(?:Total\s+Revenue|Revenue\s+from\s+operations|Revenues?)\b", row_label) and not re.search(r"(?i)\b(?:deferred|unearned)\b", row_label):
                             matched_key, matched_canonical = "revenue", "Revenue"
                         elif re.search(r"(?i)\bGross\s+Profit\b", row_label):
                             matched_key, matched_canonical = "gross_profit", "Gross Profit"
@@ -1697,26 +1739,41 @@ def _extract_multi_year_financial_tables(
                             else:
                                 sec_type = "income_statement"
 
+                            metric_spec = METRIC_TAXONOMY.get(matched_key) or {}
+                            is_monetary = not metric_spec.get("is_percent", False)
+
                             row_series = []
                             for col_idx, yr in year_cols:
-                                raw_tok = row_cells[col_idx].replace(",", "")
+                                cell_raw = row_cells[col_idx].strip()
+                                is_cell_pct = "%" in cell_raw or "percent" in eff_unit.lower()
+                                if is_monetary and is_cell_pct:
+                                    continue
+                                raw_tok = cell_raw.replace(",", "")
                                 m_num = re.search(r"[-+]?\d+(?:\.\d+)?", raw_tok)
                                 if m_num:
                                     n_val = float(m_num.group(0))
-                                    fmt_val = f"{pfx}{n_val:,.2f} {eff_unit}".replace(".00 ", " ").strip()
+                                    if is_cell_pct:
+                                        fmt_val = f"{n_val:.2f}%".replace(".00%", "%")
+                                        cell_unit = "percent"
+                                        cell_curr = "PERCENT"
+                                    else:
+                                        fmt_val = f"{pfx}{n_val:,.2f} {eff_unit}".replace(".00 ", " ").strip()
+                                        cell_unit = eff_unit
+                                        cell_curr = eff_curr
                                     row_series.append({
                                         "year": yr,
                                         "value": fmt_val,
                                         "numeric_value": n_val,
-                                        "unit": f"{eff_unit} {eff_curr}".strip(),
+                                        "unit": f"{cell_unit} {cell_curr}".strip(),
                                     })
                                     observations.append({
                                         "metric_name": matched_key,
                                         "canonical_label": matched_canonical,
                                         "raw_value": fmt_val,
                                         "numeric_value": n_val,
-                                        "currency": eff_curr,
-                                        "unit": eff_unit,
+                                        "currency": cell_curr,
+                                        "unit": cell_unit,
+                                        "is_percent": is_cell_pct,
                                         "statement_context": sec_type,
                                         "source_section": sec_type,
                                         "report_year": yr,
@@ -1810,6 +1867,8 @@ def _extract_multi_year_financial_tables(
     for m_key, canonical_label, pattern in table_metric_patterns:
         match = _find_non_reference_match(pattern, text, re.I)
         if match:
+            if re.search(r"(?i)\b(?:as\s+(?:a\s+)?(?:%|percentage)\s+of|%\s+of)\b", match.group(0)):
+                continue
             preceding = text[max(0, match.start() - 500):match.start()]
             row_curr, row_unit = extract_table_header_units(preceding)
             effective_curr = row_curr or table_curr

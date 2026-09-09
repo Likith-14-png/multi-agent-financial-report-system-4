@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -724,6 +726,281 @@ class AnalysisWorkflow:
 
         effective_b_name = second_company_name or extracted_b.get("company_name") or meta_b.get("company_name") or path_b.stem
 
+    @staticmethod
+    def _build_comparison_observation(
+        extracted: Dict[str, Any],
+        label: str,
+        key: str,
+        company_name: str,
+    ) -> Dict[str, Any]:
+        """Safely extract clean metric observations without passing conflicted dicts or raw objects."""
+        if not isinstance(extracted, dict):
+            return {"company_name": company_name, "metric": label, "value": None}
+
+        fv = (extracted.get("financial_values") or {}).get(key)
+        if isinstance(fv, dict):
+            num_val = fv.get("numeric_value")
+            if num_val is None:
+                num_val = fv.get("value")
+            if isinstance(num_val, dict):
+                num_val = num_val.get("numeric_value") or num_val.get("value")
+            if num_val is not None:
+                try:
+                    num_val = float(num_val)
+                except (ValueError, TypeError):
+                    num_val = None
+
+            disp_val = fv.get("display_value") or fv.get("raw_value")
+            if disp_val is None and num_val is not None:
+                curr = fv.get("currency") or "$"
+                unit = fv.get("unit_scale") or fv.get("unit") or ""
+                disp_val = f"{curr}{num_val:,.2f}{(' ' + unit) if unit and unit != 'unitless' else ''}"
+
+            return {
+                "company_name": company_name,
+                "metric": label,
+                "value": disp_val if disp_val is not None else num_val,
+                "raw_value": fv.get("raw_value") or disp_val,
+                "numeric_value": num_val,
+                "currency": fv.get("currency"),
+                "unit": fv.get("unit_scale") or fv.get("unit"),
+                "evidence": fv.get("evidence"),
+                "source_file": fv.get("source_file"),
+                "source_page": fv.get("source_page"),
+                "source_chunk_id": fv.get("source_chunk") or fv.get("source_chunk_id"),
+                "report_year": fv.get("year") or fv.get("period") or extracted.get("report_year"),
+            }
+
+        # Fallback to scalar metric keys in extracted dict
+        top_val = extracted.get(key)
+        if top_val is None:
+            top_val = extracted.get(label)
+        if top_val is None:
+            top_val = extracted.get(label.lower().replace(" ", "_"))
+
+        num_val = None
+        disp_val = None
+        curr = None
+        unit = None
+
+        if isinstance(top_val, dict):
+            num_val = top_val.get("numeric_value") or top_val.get("value")
+            if isinstance(num_val, dict):
+                num_val = num_val.get("numeric_value") or num_val.get("value")
+            if num_val is not None:
+                try:
+                    num_val = float(num_val)
+                except (ValueError, TypeError):
+                    num_val = None
+            disp_val = top_val.get("display_value") or top_val.get("raw_value")
+            curr = top_val.get("currency")
+            unit = top_val.get("unit") or top_val.get("unit_scale")
+        elif isinstance(top_val, (int, float)):
+            num_val = float(top_val)
+            disp_val = f"{num_val:,.2f}"
+        elif isinstance(top_val, str) and top_val.strip():
+            disp_val = top_val.strip()
+            from compare import _parse_numeric_value
+            num_val, parsed_unit = _parse_numeric_value(disp_val)
+            unit = parsed_unit
+
+        return {
+            "company_name": company_name,
+            "metric": label,
+            "value": disp_val if disp_val is not None else num_val,
+            "raw_value": disp_val,
+            "numeric_value": num_val,
+            "currency": curr,
+            "unit": unit,
+            "report_year": extracted.get("report_year"),
+        }
+
+    @staticmethod
+    def _synthesize_comparison_narrative(
+        company_a: str,
+        company_b: str,
+        records: List[Dict[str, Any]],
+        first_year: Optional[Any] = None,
+        second_year: Optional[Any] = None,
+    ) -> str:
+        """Synthesize a rigorous 2-paragraph financial comparison narrative using LLM with deterministic fallback."""
+        COMPARISON_SYSTEM_PROMPT = (
+            "You are an elite Principal Financial Analyst and Corporate Credit Strategist. "
+            "Generate an authoritative, publication-quality 2-paragraph Executive Comparison Narrative "
+            "comparing two companies based strictly on the provided financial metrics, variances, and operational line items.\n\n"
+            "Paragraph 1: Operational Scale, Revenue Trajectory & Profitability.\n"
+            "- Synthesize top-line turnover, operating income, and bottom-line earnings.\n"
+            "- Highlight the relative scale of operations, evaluate operating margins and efficiency, and identify which entity demonstrates superior operating leverage when data is available.\n\n"
+            "Paragraph 2: Capital Structure, Balance Sheet Leverage & Cash Flow Generation.\n"
+            "- Evaluate liquidity, total asset deployment, liabilities/debt burden, and operating cash flows.\n"
+            "- Provide a decisive comparative assessment of financial resilience, balance sheet strength, and competitive posture only when verified metrics permit.\n\n"
+            "Strict Guidelines:\n"
+            "1. Rely exclusively on the provided metric numbers and percentages. Do NOT fabricate or extrapolate unverified metrics.\n"
+            "2. Data Gap & Non-Comparability Directive: If a metric is marked as 'Not reported', 'N/A', or if comparison is marked non-comparable (due to missing disclosures or differing reporting currencies without an exchange rate), you MUST NOT declare a leader, infer financial resilience, or speculate on comparative buffers/margins for that dimension. You must explicitly state that direct comparison is precluded due to missing data or differing reporting currencies.\n"
+            "3. Output EXACTLY two cohesive narrative paragraphs in plain text or markdown.\n"
+            "4. Do NOT include markdown headers (# or ##), bulleted lists, or raw JSON metadata. Return only the two narrative paragraphs."
+        )
+
+        lines = []
+        for r in records:
+            m = r.get("metric")
+            val_a = r.get("company_a_value") or "Not reported"
+            val_b = r.get("company_b_value") or "Not reported"
+            diff = r.get("difference") or "N/A"
+            pct = f"{r.get('diff_percent'):+.1f}%" if r.get("diff_percent") is not None else "N/A"
+            interp = r.get("interpretation") or ""
+            lines.append(f"- {m}: {company_a} = {val_a} vs {company_b} = {val_b} | Variance: {diff} ({pct}) | Analysis: {interp}")
+
+        user_prompt = (
+            f"Compare the financial performance of {company_a} (Year: {first_year or 'Latest'}) and "
+            f"{company_b} (Year: {second_year or 'Latest'}) based on the following verified reported line items:\n\n"
+            f"{chr(10).join(lines)}\n\n"
+            "Generate the 2-paragraph Executive Comparison Narrative:"
+        )
+
+        # 1. Try Ollama (qwen2.5:7b)
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+        ollama_model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+        try:
+            req = urllib.request.Request(
+                f"{ollama_url}/api/chat",
+                data=json.dumps({
+                    "model": ollama_model,
+                    "stream": False,
+                    "options": {"temperature": 0.2, "num_predict": 1024},
+                    "messages": [
+                        {"role": "system", "content": COMPARISON_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=12.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                content = data.get("message", {}).get("content", "").strip()
+                if content:
+                    return content
+        except Exception:
+            pass
+
+        # 2. Try Gemini Service
+        try:
+            api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if api_key:
+                gemini = GeminiService(api_key=api_key)
+                content = gemini.generate_content(f"{COMPARISON_SYSTEM_PROMPT}\n\n{user_prompt}")
+                if content and isinstance(content, str) and content.strip():
+                    return content.strip()
+        except Exception:
+            pass
+
+        # 3. Deterministic High-Quality Analytical Fallback
+        metric_dict = {r.get("metric"): r for r in records}
+        rev_r = metric_dict.get("Revenue", {})
+        oi_r = metric_dict.get("Operating Income", {})
+        ni_r = metric_dict.get("Net Income", {})
+        ta_r = metric_dict.get("Total Assets", {})
+        tl_r = metric_dict.get("Total Liabilities", {})
+        cf_r = metric_dict.get("Cash Flow", {})
+
+        rev_a = rev_r.get("company_a_value") or "Not reported"
+        rev_b = rev_r.get("company_b_value") or "Not reported"
+        rev_diff = rev_r.get("difference")
+        rev_pct = f"{rev_r.get('diff_percent'):+.1f}%" if rev_r.get("diff_percent") is not None else ""
+
+        if rev_diff is not None and str(rev_diff).strip().lower() not in {"none", "n/a", "—", ""}:
+            rev_variance_str = f" (variance of {rev_diff}" + (f", {rev_pct})" if rev_pct else ")")
+        else:
+            rev_variance_str = ""
+
+        oi_a = oi_r.get("company_a_value") or "Not reported"
+        oi_b = oi_r.get("company_b_value") or "Not reported"
+        ni_a = ni_r.get("company_a_value") or "Not reported"
+        ni_b = ni_r.get("company_b_value") or "Not reported"
+
+        ta_a = ta_r.get("company_a_value") or "Not reported"
+        ta_b = ta_r.get("company_b_value") or "Not reported"
+        tl_a = tl_r.get("company_a_value") or "Not reported"
+        tl_b = tl_r.get("company_b_value") or "Not reported"
+        cf_a = cf_r.get("company_a_value") or "Not reported"
+        cf_b = cf_r.get("company_b_value") or "Not reported"
+
+        better_top = rev_r.get("better_company")
+        better_cf = cf_r.get("better_company")
+
+        # Paragraph 1 Synthesis
+        p1_intro = (
+            f"In this cross-company benchmarking analysis between {company_a} and {company_b}, {company_b} reported "
+            f"top-line revenue of {rev_b} compared to {rev_a} for {company_a}{rev_variance_str}. "
+            f"From an operational profitability standpoint, operating income reached {oi_b} for {company_b} versus "
+            f"{oi_a} for {company_a}, while bottom-line net income was recorded at {ni_b} and {ni_a} respectively."
+        )
+        if better_top:
+            p1_conclusion = f" Overall, {better_top} demonstrates greater operational scale and margin resilience based on available comparable metrics."
+        else:
+            p1_conclusion = " A definitive comparative assessment of operational scale is precluded due to incomplete reporting or non-standardized currency units."
+        p1 = p1_intro + p1_conclusion
+
+        # Paragraph 2 Synthesis
+        p2_intro = (
+            f"Evaluating balance sheet capitalization and liquidity conversion, {company_a} maintains total assets of "
+            f"{ta_a} against liabilities of {tl_a}, whereas {company_b} carries {ta_b} in total assets against "
+            f"{tl_b} in obligations. Cash flow generation registered at {cf_b} for {company_b} versus {cf_a} for {company_a}."
+        )
+        if better_cf:
+            p2_conclusion = f" Consequently, {better_cf} exhibits stronger balance sheet buffers and operational cash conversion, providing robust protection against market cyclicality."
+        else:
+            p2_conclusion = " Direct benchmarking of balance sheet strength and cash conversion buffers cannot be established due to data gaps or differing reporting currencies."
+        p2 = p2_intro + p2_conclusion
+
+        return f"{p1}\n\n{p2}"
+
+    def run_comparison(
+        self,
+        analysis_id: str,
+        first_company_name: str,
+        first_extracted: Dict[str, Any],
+        second_report_path: str,
+        second_company_name: Optional[str] = None,
+        second_report_year: Optional[str | int] = None,
+    ) -> Dict[str, Any]:
+        """Process a second company's report and perform cross-company comparison."""
+        path_b = Path(second_report_path)
+        if not path_b.exists():
+            raise FileNotFoundError(f"Second document not found: {second_report_path}")
+
+        comp_seed = f"{second_company_name or path_b.stem}:{second_report_year or '2025'}:{path_b.name}"
+        second_document_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"comp:{analysis_id}:{comp_seed}"))
+        comparison_id = f"cmp-{uuid.uuid4().hex[:8]}"
+
+        # Ingest second document with its own document_id under the same analysis_id
+        ingest_kwargs: Dict[str, Any] = {
+            "analysis_id": analysis_id,
+            "document_id": second_document_id,
+        }
+        if second_company_name:
+            ingest_kwargs["company_name"] = str(second_company_name).strip()
+        if second_report_year:
+            ingest_kwargs["report_year"] = str(second_report_year).strip()
+
+        result_b = self.document_agent.ingest_document(str(path_b), **ingest_kwargs)
+        if result_b.get("status") != "success":
+            raise ValueError(result_b.get("error") or "Second document ingestion failed")
+
+        collection = self.document_agent.collection
+        records_b = self._get_current_document_records(collection, second_company_name or "", second_document_id)
+        if not records_b:
+            records_b = []
+
+        combined_text_b = "\n\n".join(doc for doc, _ in records_b if isinstance(doc, str))
+        meta_b = records_b[0][1] if records_b else {}
+        try:
+            extracted_b = extract_report_metrics(combined_text_b, metadata=meta_b)
+        except Exception:
+            extracted_b = {"status": "unavailable", "financial_values": {}}
+
+        effective_b_name = second_company_name or extracted_b.get("company_name") or meta_b.get("company_name") or path_b.stem
+
         # Execute metric comparisons across Company A and Company B
         metric_keys = [
             ("Revenue", "revenue"),
@@ -737,62 +1014,43 @@ class AnalysisWorkflow:
 
         comparison_records: List[Dict[str, Any]] = []
         for label, key in metric_keys:
-            # Safely extract values from financial_values without passing conflicted dicts
-            # This ensures Company A and Company B observations remain completely isolated
-            fv_a = (first_extracted.get("financial_values") or {}).get(key)
-            fv_b = (extracted_b.get("financial_values") or {}).get(key)
-
-            # Extract only the essential comparison fields, keeping company scope strict
-            if isinstance(fv_a, dict) and fv_a.get("display_value") is not None:
-                obs_a = {
-                    "company_name": first_company_name,
-                    "metric": label,
-                    "value": fv_a.get("display_value"),
-                    "raw_value": fv_a.get("raw_value"),
-                    "numeric_value": fv_a.get("value"),
-                    "currency": fv_a.get("currency"),
-                    "unit": fv_a.get("unit_scale"),
-                    "evidence": fv_a.get("evidence"),
-                    "source_file": fv_a.get("source_file"),
-                    "source_page": fv_a.get("source_page"),
-                    "source_chunk_id": fv_a.get("source_chunk"),
-                    "report_year": fv_a.get("year") or fv_a.get("period"),
-                    # DO NOT pass conflicts field - keep company scopes isolated
-                }
-            else:
-                obs_a = {
-                    "company_name": first_company_name,
-                    "metric": label,
-                    "value": fv_a or first_extracted.get(key),
-                }
-
-            if isinstance(fv_b, dict) and fv_b.get("display_value") is not None:
-                obs_b = {
-                    "company_name": effective_b_name,
-                    "metric": label,
-                    "value": fv_b.get("display_value"),
-                    "raw_value": fv_b.get("raw_value"),
-                    "numeric_value": fv_b.get("value"),
-                    "currency": fv_b.get("currency"),
-                    "unit": fv_b.get("unit_scale"),
-                    "evidence": fv_b.get("evidence"),
-                    "source_file": fv_b.get("source_file"),
-                    "source_page": fv_b.get("source_page"),
-                    "source_chunk_id": fv_b.get("source_chunk"),
-                    "report_year": fv_b.get("year") or fv_b.get("period"),
-                    # DO NOT pass conflicts field - keep company scopes isolated
-                }
-            else:
-                obs_b = {
-                    "company_name": effective_b_name,
-                    "metric": label,
-                    "value": fv_b or extracted_b.get(key),
-                }
-
+            obs_a = self._build_comparison_observation(first_extracted, label, key, first_company_name)
+            obs_b = self._build_comparison_observation(extracted_b, label, key, effective_b_name)
             res = compare_company_metrics(obs_a, obs_b, metric_name=label)
-            comparison_records.append(res)
 
-        comparison_status = "completed" if any(row.get("comparison_status") in {"higher", "lower", "equal"} for row in comparison_records) else "partial"
+            # Map into clean flat UI payload format for ComparisonPage.tsx
+            num_a = res.get("company_a", {}).get("comparison_value")
+            if num_a is None:
+                num_a = res.get("company_a", {}).get("value") if isinstance(res.get("company_a", {}).get("value"), (int, float)) else None
+            num_b = res.get("company_b", {}).get("comparison_value")
+            if num_b is None:
+                num_b = res.get("company_b", {}).get("value") if isinstance(res.get("company_b", {}).get("value"), (int, float)) else None
+
+            disp_a = res.get("company_a_value") or (f"{num_a:,.2f}" if num_a is not None else "—")
+            disp_b = res.get("company_b_value") or (f"{num_b:,.2f}" if num_b is not None else "—")
+            diff_display = res.get("difference_formatted") if res.get("difference") is not None else None
+            pct = res.get("diff_percent") if res.get("diff_percent") is not None else res.get("percentage_difference")
+
+            flat_record = {
+                "metric": label,
+                "company_a": num_a,                      # Clean float for BarComparisonChart
+                "company_b": num_b,                      # Clean float for BarComparisonChart
+                "company_a_value": disp_a,              # Formatted string for table & chart labels
+                "company_b_value": disp_b,              # Formatted string for table & chart labels
+                "difference": diff_display,             # Formatted string (e.g. "+$2,900.00 million")
+                "diff_percent": pct,                    # Clean float for formatPercent(pct)
+                "difference_pct": pct,                  # Clean float for formatPercent(pct)
+                "direction": res.get("direction"),
+                "interpretation": res.get("interpretation"),
+                "unit": res.get("unit"),
+                "better_company": res.get("better_company"),
+                "comparison_status": res.get("comparison_status"),
+                "company_a_detail": res.get("company_a"),
+                "company_b_detail": res.get("company_b"),
+            }
+            comparison_records.append(flat_record)
+
+        comparison_status = "completed" if any(row.get("comparison_status") in {"higher", "lower", "equal", "comparable"} for row in comparison_records) else "partial"
         first_year = first_extracted.get("report_year")
         second_year = extracted_b.get("report_year")
         comparison_type = (
@@ -800,6 +1058,16 @@ class AnalysisWorkflow:
             if first_year not in (None, "") and second_year not in (None, "") and str(first_year) != str(second_year)
             else "single_year"
         )
+
+        # Synthesize 2-paragraph narrative for Executive Comparison Summary
+        narrative_summary = self._synthesize_comparison_narrative(
+            company_a=first_company_name,
+            company_b=effective_b_name,
+            records=comparison_records,
+            first_year=first_year,
+            second_year=second_year,
+        )
+
         return {
             "analysis_id": analysis_id,
             "comparison_id": comparison_id,
@@ -809,12 +1077,15 @@ class AnalysisWorkflow:
             "comparison_type": comparison_type,
             "metrics": comparison_records,
             "records": comparison_records,
-            "summary": {
+            "summary": narrative_summary,  # Clean 2-paragraph narrative string
+            "metadata": {                   # Raw metadata dictionary safely tucked away
                 "companies_compared": [first_company_name, effective_b_name],
                 "metrics_analyzed": len(comparison_records),
                 "comparison_status": comparison_status,
                 "company_a": first_company_name,
                 "company_b": effective_b_name,
+                "report_year_a": first_year,
+                "report_year_b": second_year,
             },
         }
 

@@ -1198,9 +1198,12 @@ class DocumentAgent:
                 return False
             if re.search(r"\b(?:continue|continues|drive|drives|delivered|generated|using|provides|platform|service|product|solution|technology)\b", haystack, re.I):
                 return False
+            boilerplate_pattern = r"(?i)\b(?:extracted\s+from(?:\s+source)?|source\s+report|downloaded\s+from|page\s+\d+|synthetic\s+(?:financial\s+)?report|table\s+of\s+contents|all\s+rights\s+reserved|disclaimer|confidential)\b"
+            if re.search(boilerplate_pattern, normalized) or re.search(r"(?i)\b(?:extracted\s+from|source\s+report)\b", haystack):
+                return False
             legal_suffix = re.search(r"\b(?:inc\.?|incorporated|limited|ltd\.?|llc|corp\.?|plc|co\.?|company|group|holdings|corporation|bancorp|technologies|systems|motors)(?=$|\W)", normalized, re.I)
             strong_source = source in {"document_metadata", "title", "issuer", "frequency"}
-            if len(words) == 1 and not (legal_suffix or (strong_source and occurrences >= 2) or source == "title"):
+            if len(words) == 1 and not (legal_suffix or (strong_source and occurrences >= 2) or source == "title" or source == "issuer"):
                 return False
             return True
 

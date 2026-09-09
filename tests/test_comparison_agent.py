@@ -549,8 +549,12 @@ def test_extraction_agent_financial_values_contains_evidence():
     Diagnostic test: Verify that extraction agent produces financial_values
     dicts with evidence field populated.
     """
-    from extraction_agent import extract_report_metrics
     import os
+    import sys
+    ext_path = os.path.join(os.path.dirname(__file__), "..", "extraction-agent")
+    if ext_path not in sys.path:
+        sys.path.insert(0, ext_path)
+    from extraction_agent import extract_report_metrics
 
     # Use one of the sample reports from the repo
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -595,3 +599,131 @@ def test_extraction_agent_financial_values_contains_evidence():
     # If this fails, we know extraction is not populating evidence
     assert len(metrics_with_evidence) > 0 or len(metrics_without_evidence) > 0, \
         "No financial metrics found in extraction result"
+
+
+def test_compare_company_metrics_with_nested_dicts_no_nan():
+    """Verify that compare_company_metrics safely parses nested dictionary observations without NaN."""
+    company_a_dict_obs = {
+        "company_name": "Company A",
+        "metric": "Revenue",
+        "value": {
+            "value": 15000.0,
+            "numeric_value": 15000.0,
+            "display_value": "$15,000 million",
+            "raw_value": "$15,000 million",
+            "currency": "USD",
+            "unit": "million",
+        },
+    }
+    company_b_dict_obs = {
+        "company_name": "Company B",
+        "metric": "Revenue",
+        "value": {
+            "value": 18000.0,
+            "numeric_value": 18000.0,
+            "display_value": "$18,000 million",
+            "raw_value": "$18,000 million",
+            "currency": "USD",
+            "unit": "million",
+        },
+    }
+
+    res = compare_company_metrics(company_a_dict_obs, company_b_dict_obs, metric_name="Revenue")
+
+    assert res["comparison_status"] == "comparable"
+    assert res["difference"] == 3000.0
+    assert res["percentage_difference"] == 20.0
+    assert res["diff_percent"] == 20.0
+    assert res["company_a_value"] == "$15,000 million"
+    assert res["company_b_value"] == "$18,000 million"
+    assert res["better_company"] == "Company B"
+
+
+def test_compare_company_metrics_strict_b_minus_a_variance_math():
+    """Verify variance is strictly (B - A) and percentage variance is ((B - A) / |A|) * 100."""
+    obs_a = {"company_name": "Amagi", "metric": "Revenue", "value": 100.0}
+    obs_b = {"company_name": "Infosys", "metric": "Revenue", "value": 150.0}
+    res = compare_company_metrics(obs_a, obs_b)
+
+    assert res["difference"] == 50.0
+    assert res["percentage_difference"] == 50.0
+    assert res["difference_formatted"] == "+$50.00"
+
+    # Negative variance case: B is smaller than A
+    obs_a2 = {"company_name": "Amagi", "metric": "Revenue", "value": 200.0}
+    obs_b2 = {"company_name": "Infosys", "metric": "Revenue", "value": 150.0}
+    res2 = compare_company_metrics(obs_a2, obs_b2)
+
+    assert res2["difference"] == -50.0
+    assert res2["percentage_difference"] == -25.0
+    assert res2["difference_formatted"] == "-$50.00"
+
+
+def test_workflow_synthesize_comparison_narrative_returns_string():
+    """Verify that _synthesize_comparison_narrative produces a clean 2-paragraph narrative string."""
+    from backend.orchestration.workflow import AnalysisWorkflow
+
+    mock_records = [
+        {
+            "metric": "Revenue",
+            "company_a_value": "$15,000 million",
+            "company_b_value": "$18,000 million",
+            "difference": "+$3,000.00 million",
+            "diff_percent": 20.0,
+            "interpretation": "Infosys has higher revenue than Amagi.",
+            "better_company": "Infosys",
+        },
+        {
+            "metric": "Operating Income",
+            "company_a_value": "$2,000 million",
+            "company_b_value": "$3,500 million",
+            "difference": "+$1,500.00 million",
+            "diff_percent": 75.0,
+            "interpretation": "Infosys has higher operating income than Amagi.",
+            "better_company": "Infosys",
+        },
+        {
+            "metric": "Total Assets",
+            "company_a_value": "$25,000 million",
+            "company_b_value": "$30,000 million",
+            "difference": "+$5,000.00 million",
+            "diff_percent": 20.0,
+            "interpretation": "Infosys has higher total assets than Amagi.",
+            "better_company": "Infosys",
+        },
+        {
+            "metric": "Total Liabilities",
+            "company_a_value": "$10,000 million",
+            "company_b_value": "$12,000 million",
+            "difference": "+$2,000.00 million",
+            "diff_percent": 20.0,
+            "interpretation": "Amagi has lower total liabilities than Infosys.",
+            "better_company": "Amagi",
+        },
+        {
+            "metric": "Cash Flow",
+            "company_a_value": "$2,500 million",
+            "company_b_value": "$4,000 million",
+            "difference": "+$1,500.00 million",
+            "diff_percent": 60.0,
+            "interpretation": "Infosys has higher cash flow than Amagi.",
+            "better_company": "Infosys",
+        },
+    ]
+
+    narrative = AnalysisWorkflow._synthesize_comparison_narrative(
+        company_a="Amagi",
+        company_b="Infosys",
+        records=mock_records,
+        first_year=2024,
+        second_year=2025,
+    )
+
+    assert isinstance(narrative, str)
+    assert not narrative.startswith("{")
+    assert "Amagi" in narrative
+    assert "Infosys" in narrative
+    # Must have at least 2 distinct paragraphs separated by blank lines
+    paragraphs = [p.strip() for p in narrative.split("\n\n") if p.strip()]
+    assert len(paragraphs) >= 2
+

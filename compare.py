@@ -117,11 +117,25 @@ def _safe_float(value: Any) -> Optional[float]:
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        return float(value) if not math.isnan(value) else None
+    if isinstance(value, dict):
+        for k in ("numeric_value", "value", "comparison_value", "amount"):
+            v = value.get(k)
+            if v is not None:
+                parsed = _safe_float(v)
+                if parsed is not None:
+                    return parsed
+        for k in ("display_value", "raw_value"):
+            v = value.get(k)
+            if v is not None:
+                parsed = _safe_float(v)
+                if parsed is not None:
+                    return parsed
+        return None
     text = str(value).strip()
     if not text or text.lower() in {"na", "n/a", "not available", "unavailable", "none", "null"}:
         return None
-    cleaned = text.replace("$", "").replace("€", "").replace("£", "").replace(",", "").replace("%", "")
+    cleaned = text.replace("$", "").replace("€", "").replace("£", "").replace("₹", "").replace(",", "").replace("%", "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     try:
         return float(cleaned)
@@ -133,7 +147,22 @@ def _parse_numeric_value(value: Any) -> Tuple[Optional[float], Optional[str]]:
     if value is None or value == "":
         return None, None
     if isinstance(value, (int, float)):
-        return float(value), "unitless"
+        return float(value) if not math.isnan(value) else None, "unitless"
+    if isinstance(value, dict):
+        unit = value.get("unit") or value.get("unit_scale")
+        for k in ("numeric_value", "value", "comparison_value", "amount"):
+            v = value.get(k)
+            if v is not None and not isinstance(v, dict):
+                num = _safe_float(v)
+                if num is not None:
+                    return num, unit or "unitless"
+        for k in ("display_value", "raw_value"):
+            v = value.get(k)
+            if v is not None:
+                num, parsed_unit = _parse_numeric_value(v)
+                if num is not None:
+                    return num, unit or parsed_unit or "unitless"
+        return None, unit
     text = str(value).strip()
     if not text or text.lower() in {"na", "n/a", "not available", "unavailable", "none", "null"}:
         return None, None
@@ -386,7 +415,20 @@ def _structured_comparison_value(record: Dict[str, Any], metric_name: str) -> Di
             record.get(metric_key.replace(" ", "_")),
             record.get(metric_name),
         )
+    if isinstance(raw_value, dict):
+        raw_value = (
+            raw_value.get("display_value")
+            or raw_value.get("raw_value")
+            or raw_value.get("numeric_value")
+            or raw_value.get("value")
+        )
+
     numeric_value = source_record.get("numeric_value")
+    if isinstance(numeric_value, dict):
+        numeric_value = numeric_value.get("numeric_value") or numeric_value.get("value")
+    if numeric_value is not None:
+        numeric_value = _safe_float(numeric_value)
+
     unit = source_record.get("unit") or source_record.get("unit_scale")
     currency = source_record.get("currency") or source_record.get("currency_code")
     unit_multiplier = source_record.get("unit_multiplier")
@@ -441,16 +483,27 @@ def _comparison_payload(
 ) -> Dict[str, Any]:
     context_a = _structured_comparison_value(company_a, metric_label)
     context_b = _structured_comparison_value(company_b, metric_label)
+    display_a = str(a_raw) if a_raw is not None and not isinstance(a_raw, dict) else (
+        context_a.get("raw_value") or "—"
+    )
+    display_b = str(b_raw) if b_raw is not None and not isinstance(b_raw, dict) else (
+        context_b.get("raw_value") or "—"
+    )
     return {
         "metric": metric_label,
         "company_a": {"company_name": company_a.get("company_name") or "Company A", "value": a_raw, "currency": context_a.get("currency"), "unit": context_a.get("unit")},
         "company_b": {"company_name": company_b.get("company_name") or "Company B", "value": b_raw, "currency": context_b.get("currency"), "unit": context_b.get("unit")},
+        "company_a_value": display_a,
+        "company_b_value": display_b,
         "difference": None,
+        "difference_formatted": "—",
+        "diff_percent": None,
+        "difference_pct": None,
+        "percentage_difference": None,
         "direction": "unavailable",
         "unit": None,
         "comparison_status": "not_comparable",
         "absolute_difference": None,
-        "percentage_difference": None,
         "difference_basis": "company_b_minus_company_a",
         "metric_direction": None,
         "better_company": None,
@@ -479,7 +532,12 @@ def _has_missing_value(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return False
     if isinstance(value, dict):
-        if _has_missing_value(value.get("value")):
+        v = value.get("value")
+        if v is None:
+            v = value.get("numeric_value")
+        if v is None:
+            v = value.get("display_value") or value.get("raw_value")
+        if v is None or _has_missing_value(v):
             return True
         status = value.get("status")
         semantic_status = value.get("semantic_status")
@@ -895,7 +953,13 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
         company_a.get(m_key),
         company_a.get(metric_label),
     )
-    a_raw = None if isinstance(a_raw, dict) and "value" in a_raw else a_raw  # Sanitize dict with conflicts
+    if isinstance(a_raw, dict):
+        a_raw = (
+            a_raw.get("display_value")
+            or a_raw.get("raw_value")
+            or a_raw.get("numeric_value")
+            or a_raw.get("value")
+        )
 
     # Company B observation extraction with strict scoping
     b_raw = _coalesce_first_non_none(
@@ -905,7 +969,13 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
         company_b.get(m_key),
         company_b.get(metric_label),
     )
-    b_raw = None if isinstance(b_raw, dict) and "value" in b_raw else b_raw  # Sanitize dict with conflicts
+    if isinstance(b_raw, dict):
+        b_raw = (
+            b_raw.get("display_value")
+            or b_raw.get("raw_value")
+            or b_raw.get("numeric_value")
+            or b_raw.get("value")
+        )
     metric_a = _comparison_metric_key(company_a.get("metric") or metric_label)
     metric_b = _comparison_metric_key(company_b.get("metric") or metric_label)
     requested_metric = _comparison_metric_key(metric_label)
@@ -962,32 +1032,20 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     if normalized_a is None or normalized_b is None:
         return _comparison_payload(metric_label, company_a, company_b, a_raw, b_raw, a_value, b_value, a_unit, b_unit, "the units cannot be normalized")
 
-    if period_a is not None and period_b is not None and period_a != period_b:
-        if period_a > period_b:
-            previous_value = normalized_b
-            current_value = normalized_a
-            previous_company = company_b
-            current_company = company_a
-        else:
-            previous_value = normalized_a
-            current_value = normalized_b
-            previous_company = company_a
-            current_company = company_b
-    else:
-        previous_value = normalized_a
-        current_value = normalized_b
-        previous_company = company_a
-        current_company = company_b
-
-    difference = _rounded_float(current_value - previous_value)
+    # In cross-company benchmarking, Company A is the baseline and Company B is the benchmark peer.
+    # Variance is strictly (B - A) and percentage variance is ((B - A) / |A|) * 100
+    val_a = float(normalized_a)
+    val_b = float(normalized_b)
+    difference = _rounded_float(val_b - val_a)
     direction = "increase" if difference > 0 else "decrease" if difference < 0 else "unchanged"
-    status = "equal" if math.isclose(previous_value, current_value, rel_tol=0.0, abs_tol=1e-10) else "comparable"
-    if previous_value == 0 and current_value == 0:
+    status = "equal" if math.isclose(val_a, val_b, rel_tol=0.0, abs_tol=1e-10) else "comparable"
+    if val_a == 0 and val_b == 0:
         percentage_difference = 0.0
-    elif previous_value == 0:
+    elif val_a == 0:
         percentage_difference = None
     else:
-        percentage_difference = _percentage_change(current_value, previous_value)
+        percentage_difference = _rounded_float(((val_b - val_a) / abs(val_a)) * 100.0)
+
     direction_rules = {
         "revenue": "higher_better",
         "operating income": "higher_better",
@@ -1004,19 +1062,19 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     better_company = None
     if status != "equal" and metric_direction != "neutral":
         if metric_direction == "higher_better":
-            if current_value > previous_value:
-                better_company = current_company.get("company_name") or "Company B"
-            elif current_value < previous_value:
-                better_company = previous_company.get("company_name") or "Company A"
+            if val_b > val_a:
+                better_company = company_b.get("company_name") or "Company B"
+            elif val_a > val_b:
+                better_company = company_a.get("company_name") or "Company A"
         else:
-            if current_value < previous_value:
-                better_company = current_company.get("company_name") or "Company B"
-            elif current_value > previous_value:
-                better_company = previous_company.get("company_name") or "Company A"
+            if val_b < val_a:
+                better_company = company_b.get("company_name") or "Company B"
+            elif val_a < val_b:
+                better_company = company_a.get("company_name") or "Company A"
     if status == "equal":
         interpretation = "The companies have equal normalized values."
     elif better_company:
-        other_company = previous_company.get("company_name") or "Company A" if better_company == (current_company.get("company_name") or "Company B") else current_company.get("company_name") or "Company B"
+        other_company = company_a.get("company_name") or "Company A" if better_company == (company_b.get("company_name") or "Company B") else company_b.get("company_name") or "Company B"
         interpretation = f"{better_company} has {'higher' if metric_direction == 'higher_better' else 'lower'} {metric_label.lower()} than {other_company}."
     else:
         interpretation = f"The companies have different {metric_label.lower()} values; the metric direction is neutral."
@@ -1056,16 +1114,46 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
     if company_b.get("source_chunk_id"):
         company_b_section["source_chunk_id"] = company_b.get("source_chunk_id")
 
+    # Format human-friendly display strings for UI components
+    curr_a_symbol = currency_a or "$"
+    curr_b_symbol = currency_b or "$"
+    unit_a_str = f" {a_unit}" if a_unit and a_unit != "unitless" else ""
+    unit_b_str = f" {b_unit}" if b_unit and b_unit != "unitless" else ""
+
+    if a_raw is not None and not isinstance(a_raw, dict) and any(c in str(a_raw) for c in ("$", "₹", "€", "£", "million", "billion", "crore", "lakh", "%")):
+        display_a = str(a_raw)
+    else:
+        display_a = f"{curr_a_symbol}{val_a:,.2f}{unit_a_str}" if currency_a else f"{val_a:,.2f}{unit_a_str}".strip()
+
+    if b_raw is not None and not isinstance(b_raw, dict) and any(c in str(b_raw) for c in ("$", "₹", "€", "£", "million", "billion", "crore", "lakh", "%")):
+        display_b = str(b_raw)
+    else:
+        display_b = f"{curr_b_symbol}{val_b:,.2f}{unit_b_str}" if currency_b else f"{val_b:,.2f}{unit_b_str}".strip()
+
+    diff_curr = currency_b or currency_a or "$"
+    diff_unit_str = f" {target_unit}" if target_unit and target_unit != "unitless" else ""
+    if difference > 0:
+        formatted_difference = f"+{diff_curr}{abs(difference):,.2f}{diff_unit_str}"
+    elif difference < 0:
+        formatted_difference = f"-{diff_curr}{abs(difference):,.2f}{diff_unit_str}"
+    else:
+        formatted_difference = f"{diff_curr}0.00{diff_unit_str}".strip()
+
     return {
         "metric": metric_label,
         "company_a": company_a_section,
         "company_b": company_b_section,
+        "company_a_value": display_a,
+        "company_b_value": display_b,
         "difference": difference,
+        "difference_formatted": formatted_difference,
+        "diff_percent": percentage_difference,
+        "difference_pct": percentage_difference,
+        "percentage_difference": percentage_difference,
         "direction": direction,
         "unit": target_unit,
         "comparison_status": status,
         "absolute_difference": _rounded_float(abs(difference)),
-        "percentage_difference": percentage_difference,
         "difference_basis": "company_b_minus_company_a",
         "metric_direction": metric_direction,
         "better_company": better_company,
@@ -1073,8 +1161,8 @@ def compare_company_metrics(company_a: Dict[str, Any], company_b: Dict[str, Any]
         "comparability_metadata": {
             "original_company_a_value": a_raw,
             "original_company_b_value": b_raw,
-            "normalized_company_a_value": _rounded_float(normalized_a),
-            "normalized_company_b_value": _rounded_float(normalized_b),
+            "normalized_company_a_value": _rounded_float(val_a),
+            "normalized_company_b_value": _rounded_float(val_b),
             "currency": currency_a or currency_b,
             "unit_scale": target_unit,
             "reporting_period": period_a if period_a is not None else period_b,
